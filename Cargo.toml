@@ -1,0 +1,25 @@
+[package]
+name = "toasty-mgr"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Multi-data-source manager for Toasty backed by a built-in base_ds model"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1.89"
+paste = "1.0"
+tokio = { version = "1", features = ["sync"] }
+toasty = "0.8.0"
+tracing = "0.1"
+url = "2.5"
+
+[features]
+default = []
+mysql = ["toasty/mysql"]
+postgresql = ["toasty/postgresql"]
+sqlite = ["toasty/sqlite"]
+turso = ["toasty/turso"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

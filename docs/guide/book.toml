@@ -1,0 +1,10 @@
+[book]
+title = "toasty-mgr Guide"
+description = "Manage Toasty data sources from a built-in base_ds catalog"
+authors = ["toasty-mgr contributors"]
+language = "zh-CN"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
