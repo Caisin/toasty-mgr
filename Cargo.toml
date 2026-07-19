@@ -15,7 +15,7 @@ bon = "3.9"
 pastey = "0.2.3"
 tokio = { version = "1", features = ["sync"] }
 toasty = "0.8.0"
-toasty-mgr-macros = { path = "toasty-mgr-macros" }
+toasty-mgr-macros = {version="0.1.0", path = "toasty-mgr-macros" }
 tracing = "0.1"
 url = "2.5"
 
