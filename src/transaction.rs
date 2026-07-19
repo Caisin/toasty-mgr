@@ -1,7 +1,6 @@
-use std::{collections::HashMap, ops::AsyncFnOnce, sync::Arc};
+use std::{collections::HashMap, future::Future, ops::AsyncFnOnce, pin::Pin, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
 
 use crate::{
     Executor, ToastyConnectionManager, Transaction,
@@ -39,18 +38,38 @@ impl TcTx {
     }
 }
 
-#[async_trait]
+// Toasty 0.8 expands Executor into boxed futures; implement that form directly.
 impl Executor for TcTx {
-    async fn transaction(&mut self) -> crate::Result<Transaction<'_>> {
-        self.inner.transaction().await
+    fn transaction<'borrow, 'future>(
+        &'borrow mut self,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Transaction<'borrow>>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.transaction().await })
     }
 
-    async fn exec_untyped(&mut self, stmt: stmt::Statement) -> crate::Result<ExecResponse> {
-        self.inner.exec_untyped(stmt).await
+    fn exec_untyped<'borrow, 'future>(
+        &'borrow mut self,
+        stmt: stmt::Statement,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<ExecResponse>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.exec_untyped(stmt).await })
     }
 
-    async fn exec_raw_sql(&mut self, raw: RawSql) -> crate::Result<ExecResponse> {
-        self.inner.exec_raw_sql(raw).await
+    fn exec_raw_sql<'borrow, 'future>(
+        &'borrow mut self,
+        raw: RawSql,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<ExecResponse>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.exec_raw_sql(raw).await })
     }
 
     fn capability(&mut self) -> &Capability {

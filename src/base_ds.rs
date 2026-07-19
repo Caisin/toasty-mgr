@@ -1,9 +1,8 @@
 #![allow(missing_docs)]
 
-use std::{path::Path, sync::Arc};
+use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 use anyhow::{Result, anyhow, bail};
-use async_trait::async_trait;
 use url::Url;
 
 use crate::{Executor, Model};
@@ -13,26 +12,53 @@ use crate::{Executor, Model};
 /// By default passwords are treated as plaintext. Applications that store
 /// encrypted or secret-manager references can install a resolver through
 /// [`crate::TcMgr::set_password_resolver`].
-#[async_trait]
 pub trait PasswordResolver: Send + Sync + 'static {
-    async fn resolve(&self, stored: &str) -> Result<String>;
+    fn resolve<'a>(&'a self, stored: &'a str) -> impl Future<Output = Result<String>> + Send + 'a;
+}
+
+trait ErasedPasswordResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        stored: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+}
+
+impl<R> ErasedPasswordResolver for R
+where
+    R: PasswordResolver,
+{
+    fn resolve<'a>(
+        &'a self,
+        stored: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(PasswordResolver::resolve(self, stored))
+    }
 }
 
 static PASSWORD_RESOLVER: std::sync::OnceLock<
-    std::sync::RwLock<Option<Arc<dyn PasswordResolver>>>,
+    std::sync::RwLock<Option<Arc<dyn ErasedPasswordResolver>>>,
 > = std::sync::OnceLock::new();
 
-fn password_resolver() -> &'static std::sync::RwLock<Option<Arc<dyn PasswordResolver>>> {
+fn password_resolver() -> &'static std::sync::RwLock<Option<Arc<dyn ErasedPasswordResolver>>> {
     PASSWORD_RESOLVER.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-pub(crate) fn set_password_resolver(resolver: Option<Arc<dyn PasswordResolver>>) {
+pub(crate) fn set_password_resolver<R>(resolver: R)
+where
+    R: PasswordResolver,
+{
     *password_resolver()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = resolver;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(resolver));
 }
 
-fn current_password_resolver() -> Option<Arc<dyn PasswordResolver>> {
+pub(crate) fn clear_password_resolver() {
+    *password_resolver()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+fn current_password_resolver() -> Option<Arc<dyn ErasedPasswordResolver>> {
     password_resolver()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -181,6 +207,14 @@ impl BaseDs {
 mod tests {
     use super::*;
 
+    struct TestResolver;
+
+    impl PasswordResolver for TestResolver {
+        async fn resolve(&self, stored: &str) -> Result<String> {
+            Ok(format!("resolved:{stored}"))
+        }
+    }
+
     fn ds(db_type: &str, port: i32) -> BaseDs {
         BaseDs {
             ds_code: "base".into(),
@@ -202,6 +236,15 @@ mod tests {
         assert_eq!(ds("postgres", 0).effective_port(), 5432);
         assert_eq!(ds("postgresql", 0).effective_port(), 5432);
         assert_eq!(ds("sqlite", 0).effective_port(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_async_password_resolver_is_erased() {
+        let password = ErasedPasswordResolver::resolve(&TestResolver, "secret")
+            .await
+            .unwrap();
+
+        assert_eq!(password, "resolved:secret");
     }
 
     #[tokio::test]

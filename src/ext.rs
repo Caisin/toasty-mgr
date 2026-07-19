@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use anyhow::Result;
 
@@ -12,7 +12,7 @@ use crate::{
 #[macro_export]
 macro_rules! tc_mgr_ext {
     ($($code:ident => $models:expr),* $(,)?) => {
-        $crate::paste::paste! {
+        $crate::pastey::paste! {
             #[allow(async_fn_in_trait)]
             pub trait TcMgrExt {
                 $(
@@ -50,12 +50,12 @@ impl ToastyConnectionManager {
     where
         R: PasswordResolver,
     {
-        crate::base_ds::set_password_resolver(Some(Arc::new(resolver)));
+        crate::base_ds::set_password_resolver(resolver);
     }
 
     /// Restore plaintext password handling.
     pub fn clear_password_resolver() {
-        crate::base_ds::set_password_resolver(None);
+        crate::base_ds::clear_password_resolver();
     }
 
     /// Associate a Toasty model set with a managed data-source code.

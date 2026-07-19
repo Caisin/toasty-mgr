@@ -14,7 +14,7 @@ pub mod transaction;
 pub use anyhow;
 pub use base_ds::{BaseDs, PasswordResolver};
 #[doc(hidden)]
-pub use paste;
+pub use pastey;
 pub use registry::{TcConn, TcConnMeta, TcConnections, TcDbAliases, TcModelSets};
 pub use toasty::*;
 pub use transaction::{TcTx, TcTxMgr};

@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    future::Future,
+    pin::Pin,
     sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
 use anyhow::{Result as AnyResult, anyhow};
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -35,18 +36,38 @@ impl fmt::Debug for TcConn {
     }
 }
 
-#[async_trait]
+// Toasty 0.8 expands Executor into boxed futures; implement that form directly.
 impl Executor for TcConn {
-    async fn transaction(&mut self) -> crate::Result<Transaction<'_>> {
-        self.inner.transaction().await
+    fn transaction<'borrow, 'future>(
+        &'borrow mut self,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<Transaction<'borrow>>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.transaction().await })
     }
 
-    async fn exec_untyped(&mut self, stmt: stmt::Statement) -> crate::Result<ExecResponse> {
-        self.inner.exec_untyped(stmt).await
+    fn exec_untyped<'borrow, 'future>(
+        &'borrow mut self,
+        stmt: stmt::Statement,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<ExecResponse>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.exec_untyped(stmt).await })
     }
 
-    async fn exec_raw_sql(&mut self, raw: RawSql) -> crate::Result<ExecResponse> {
-        self.inner.exec_raw_sql(raw).await
+    fn exec_raw_sql<'borrow, 'future>(
+        &'borrow mut self,
+        raw: RawSql,
+    ) -> Pin<Box<dyn Future<Output = crate::Result<ExecResponse>> + Send + 'future>>
+    where
+        'borrow: 'future,
+        Self: 'future,
+    {
+        Box::pin(async move { self.inner.exec_raw_sql(raw).await })
     }
 
     fn capability(&mut self) -> &Capability {
@@ -547,6 +568,13 @@ fn positive_timeout_secs(value: Option<i64>) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_connection_remains_an_executor() {
+        fn assert_executor<T: Executor>() {}
+
+        assert_executor::<TcConn>();
+    }
 
     #[test]
     fn base_model_set_is_always_available() {
