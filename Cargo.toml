@@ -1,6 +1,6 @@
 [package]
 name = "toasty-mgr"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-data-source manager for Toasty backed by a built-in base_ds model"
