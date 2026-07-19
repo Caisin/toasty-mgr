@@ -1,7 +1,6 @@
 # API 速查
 
-日常代码优先使用短名 `TcMgr` 和 `TcTxMgr`。正式管理器类型名是
-`ToastyConnectionManager`，`TcMgr` 是它的类型别名。
+连接管理器类型是 `TcMgr`，事务管理器类型是 `TcTxMgr`。
 
 ## 启动与模型
 

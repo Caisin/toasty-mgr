@@ -3,7 +3,7 @@ use std::{collections::HashMap, future::Future, ops::AsyncFnOnce, pin::Pin, sync
 use anyhow::{Result, anyhow};
 
 use crate::{
-    Executor, ToastyConnectionManager, Transaction,
+    Executor, TcMgr, Transaction,
     codegen_support::core::{
         Schema,
         driver::{Capability, ExecResponse, operation::RawSql},
@@ -182,7 +182,7 @@ impl TcTxMgr {
         F: for<'a> AsyncFnOnce(&'a mut Transaction<'_>) -> Result<T> + Send,
         T: Send,
     {
-        let mut db = ToastyConnectionManager::get(code).await?;
+        let mut db = TcMgr::get(code).await?;
         let mut tx = db.transaction().await?;
         match callback(&mut tx).await {
             Ok(value) => {
@@ -197,7 +197,7 @@ impl TcTxMgr {
     }
 
     async fn begin_owned_tx(code: &str) -> Result<TcTx> {
-        let mut db = ToastyConnectionManager::get(code).await?;
+        let mut db = TcMgr::get(code).await?;
         let tx = db.transaction().await?;
 
         // Toasty creates ConnRef::Owned for Db transactions. The lifetime is a

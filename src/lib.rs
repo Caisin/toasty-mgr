@@ -23,12 +23,9 @@ pub use transaction::{TcTx, TcTxMgr};
 pub const BASE: &str = "base";
 
 /// Process-wide Toasty connection manager.
-pub struct ToastyConnectionManager;
+pub struct TcMgr;
 
-/// Short name for [`ToastyConnectionManager`].
-pub type TcMgr = ToastyConnectionManager;
-
-impl ToastyConnectionManager {
+impl TcMgr {
     /// Return all registered source and alias codes.
     pub async fn all_codes() -> Vec<String> {
         let mut codes = TcConnections::all_metas()

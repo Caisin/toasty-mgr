@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::{
-    BaseDs, Db, ModelSet, PasswordResolver, TcConnections, TcDbAliases, TcModelSets,
-    ToastyConnectionManager,
+    BaseDs, Db, ModelSet, PasswordResolver, TcConnections, TcDbAliases, TcMgr, TcModelSets,
 };
 
-/// Generate data-source-specific shortcuts for [`ToastyConnectionManager`] and
-/// [`crate::TcTxMgr`].
+/// Generate data-source-specific shortcuts for [`TcMgr`] and [`crate::TcTxMgr`].
 #[macro_export]
 macro_rules! tc_mgr_ext {
     ($($code:ident => $models:expr),* $(,)?) => {
@@ -17,16 +15,16 @@ macro_rules! tc_mgr_ext {
             pub trait TcMgrExt {
                 $(
                     fn [<init_ $code _models>]() {
-                        $crate::ToastyConnectionManager::set_models(stringify!($code), $models);
+                        $crate::TcMgr::set_models(stringify!($code), $models);
                     }
 
                     async fn $code() -> $crate::anyhow::Result<$crate::Db> {
-                        $crate::ToastyConnectionManager::get(stringify!($code)).await
+                        $crate::TcMgr::get(stringify!($code)).await
                     }
                 )*
             }
         }
-        impl TcMgrExt for $crate::ToastyConnectionManager {}
+        impl TcMgrExt for $crate::TcMgr {}
 
         #[allow(async_fn_in_trait)]
         pub trait TcTxMgrExt {
@@ -44,7 +42,7 @@ macro_rules! tc_mgr_ext {
     };
 }
 
-impl ToastyConnectionManager {
+impl TcMgr {
     /// Install an application-specific password resolver.
     pub fn set_password_resolver<R>(resolver: R)
     where
