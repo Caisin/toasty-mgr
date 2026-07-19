@@ -155,6 +155,9 @@ fn query_spec_does_not_require_tc_query_derive() {
         .build()
         .into_expr()
         .unwrap();
+    let filter_only = FilterOnly::default();
+    assert_eq!(filter_only.page, 1);
+    assert_eq!(filter_only.size, 10);
     let _ = SortOnly::builder().asc_name().build().into_query().unwrap();
     let page_only = PageOnly::default();
     assert_eq!(page_only.page, 1);
@@ -254,6 +257,16 @@ async fn assert_query_spec_backend(code: &str, url: &str) -> anyhow::Result<()> 
         .count(&mut db)
         .await?;
     assert_eq!(count, 3);
+
+    let default_page = FilterOnly::builder()
+        .state(true)
+        .build()
+        .fetch_page(&mut db)
+        .await?;
+    assert_eq!(default_page.paging.page, 1);
+    assert_eq!(default_page.paging.size, 10);
+    assert_eq!(default_page.total, 3);
+    assert_eq!(default_page.items.len(), 3);
 
     let all = CustomerSearch::builder()
         .state(true)

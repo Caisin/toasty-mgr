@@ -228,14 +228,12 @@ impl QuerySpec {
                 );
             }
         }
-        if self.page.is_some() {
-            for reserved in ["page", "size"] {
-                if !method_names.insert(reserved.to_owned()) {
-                    combine_error(
-                        &mut errors,
-                        syn::Error::new(self.name.span(), format!("`{reserved}` is reserved")),
-                    );
-                }
+        for reserved in ["page", "size"] {
+            if !method_names.insert(reserved.to_owned()) {
+                combine_error(
+                    &mut errors,
+                    syn::Error::new(self.name.span(), format!("`{reserved}` is reserved")),
+                );
             }
         }
         for sort in &self.sorts {
@@ -269,15 +267,20 @@ impl QuerySpec {
             let ty = &filter.ty;
             quote!(#name: Option<#ty>,)
         });
-        let page_fields = self.page.iter().map(|page| {
-            let default_size = &page.default_size;
-            quote! {
-                #[builder(default = 1)]
-                page: u64,
-                #[builder(default = #default_size)]
-                size: u64,
-            }
-        });
+        let (default_size, max_size) = self.page.as_ref().map_or_else(
+            || (quote!(10_u64), quote!(100_u64)),
+            |page| {
+                let default_size = &page.default_size;
+                let max_size = &page.max_size;
+                (quote!(#default_size), quote!(#max_size))
+            },
+        );
+        let page_fields = quote! {
+            #[builder(default = 1)]
+            page: u64,
+            #[builder(default = #default_size)]
+            size: u64,
+        };
         let order_variants = self.sorts.iter().map(|field| {
             let variant = order_variant(field);
             quote!(#variant(#root::query::TcQuerySortDirection),)
@@ -419,69 +422,65 @@ impl QuerySpec {
                 },
             )
         };
-        let page_impl = self.page.iter().map(|page| {
-            let default_size = &page.default_size;
-            let max_size = &page.max_size;
-            quote! {
-                const _: () = {
-                    assert!(#default_size > 0, "default_size must be at least 1");
-                    assert!(#default_size <= #max_size, "default_size must not exceed max_size");
-                };
+        let page_impl = quote! {
+            const _: () = {
+                assert!(#default_size > 0, "default_size must be at least 1");
+                assert!(#default_size <= #max_size, "default_size must not exceed max_size");
+            };
 
-                impl #name {
-                    fn validated_paging(
-                        &self,
-                    ) -> Result<#root::query::Paging, #root::query::TcQueryBuildError> {
-                        if self.page == 0 {
-                            return Err(#root::query::TcQueryBuildError::InvalidPageNumber);
-                        }
-                        if self.size == 0 || self.size > #max_size {
-                            return Err(#root::query::TcQueryBuildError::InvalidPageSize {
-                                size: self.size,
-                                max: #max_size,
-                            });
-                        }
-                        Ok(#root::query::Paging {
-                            page: self.page,
+            impl #name {
+                fn validated_paging(
+                    &self,
+                ) -> Result<#root::query::Paging, #root::query::TcQueryBuildError> {
+                    if self.page == 0 {
+                        return Err(#root::query::TcQueryBuildError::InvalidPageNumber);
+                    }
+                    if self.size == 0 || self.size > #max_size {
+                        return Err(#root::query::TcQueryBuildError::InvalidPageSize {
                             size: self.size,
-                        })
+                            max: #max_size,
+                        });
                     }
+                    Ok(#root::query::Paging {
+                        page: self.page,
+                        size: self.size,
+                    })
+                }
 
-                    #vis async fn fetch_page(
-                        self,
-                        executor: &mut dyn #root::Executor,
-                    ) -> Result<#root::query::Page<#model>, #root::query::TcQueryError> {
-                        let paging = self.validated_paging()?;
-                        let size = usize::try_from(paging.size)
-                            .map_err(|_| #root::query::TcQueryBuildError::OffsetOverflow)?;
-                        let offset = (paging.page - 1)
-                            .checked_mul(paging.size)
-                            .and_then(|offset| usize::try_from(offset).ok())
-                            .ok_or(#root::query::TcQueryBuildError::OffsetOverflow)?;
-                        let (expr, orders) = self.into_parts();
+                #vis async fn fetch_page(
+                    self,
+                    executor: &mut dyn #root::Executor,
+                ) -> Result<#root::query::Page<#model>, #root::query::TcQueryError> {
+                    let paging = self.validated_paging()?;
+                    let size = usize::try_from(paging.size)
+                        .map_err(|_| #root::query::TcQueryBuildError::OffsetOverflow)?;
+                    let offset = (paging.page - 1)
+                        .checked_mul(paging.size)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                        .ok_or(#root::query::TcQueryBuildError::OffsetOverflow)?;
+                    let (expr, orders) = self.into_parts();
 
-                        let total = #model::filter(expr.clone())
-                            .count()
-                            .exec(executor)
-                            .await?;
-                        let query = Self::apply_orders(#model::filter(expr), orders)?;
-                        let items = query.limit(size).offset(offset).exec(executor).await?;
-                        let total_pages = if total == 0 {
-                            0
-                        } else {
-                            (total - 1) / paging.size + 1
-                        };
+                    let total = #model::filter(expr.clone())
+                        .count()
+                        .exec(executor)
+                        .await?;
+                    let query = Self::apply_orders(#model::filter(expr), orders)?;
+                    let items = query.limit(size).offset(offset).exec(executor).await?;
+                    let total_pages = if total == 0 {
+                        0
+                    } else {
+                        (total - 1) / paging.size + 1
+                    };
 
-                        Ok(#root::query::Page {
-                            items,
-                            paging,
-                            total,
-                            total_pages,
-                        })
-                    }
+                    Ok(#root::query::Page {
+                        items,
+                        paging,
+                        total,
+                        total_pages,
+                    })
                 }
             }
-        });
+        };
 
         Ok(quote! {
             #[derive(Debug, #root::bon::Builder)]
@@ -492,7 +491,7 @@ impl QuerySpec {
                 #[builder(field = Vec::new())]
                 orders: Vec<#order_type>,
                 #( #filter_fields )*
-                #( #page_fields )*
+                #page_fields
             }
 
             #[derive(Debug)]
@@ -565,7 +564,7 @@ impl QuerySpec {
                 }
             }
 
-            #( #page_impl )*
+            #page_impl
         })
     }
 }

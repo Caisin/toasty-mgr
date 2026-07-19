@@ -104,9 +104,10 @@ let request = CustomerSearch::builder()
     .build();
 ```
 
-只有 `filters` 必填。`sort`、`default_order`、`tie_breaker`、`page` 可以依次省略；省略后
-不会生成对应 setter 或附加隐藏排序。分页未声明稳定排序时，跨页结果可能随数据库返回
-顺序变化。
+只有 `filters` 必填。`sort`、`default_order`、`tie_breaker`、`page` 配置可以依次省略。
+省略排序区块后不会生成对应 setter 或附加隐藏排序。省略 `page` 配置时仍生成 `.page()`、
+`.size()` 和 `fetch_page()`，默认第一页、每页 10 条、最大 100 条。分页未声明稳定排序
+时，跨页结果可能随数据库返回顺序变化。
 
 生成结构体提供：
 
@@ -119,8 +120,8 @@ let request = CustomerSearch::builder()
 | `fetch_page(executor)` | 校验 1-based page/size，返回 `query::Page<Model>` |
 | `filter(expr)` | 追加任意 Toasty `Expr<bool>`，可以重复调用 |
 
-省略 `page { ... }` 时不生成 `page`、`size` setter 和 `fetch_page()`。`Paging` 表示已
-校验的请求页，`Page<T>` 包含 `items`、`paging`、`total` 和 `total_pages`。
+`Paging` 表示已校验的请求页，`Page<T>` 包含 `items`、`paging`、`total` 和
+`total_pages`。显式 `page { ... }` 可以覆盖默认 page size 和最大值。
 
 需要直接扩展 Toasty query builder 时，可以按模型选择性 derive `TcQuery`：
 
