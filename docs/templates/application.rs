@@ -10,6 +10,24 @@ pub struct Customer {
     pub name: String,
 }
 
+toasty_mgr::tc_query_spec! {
+    pub CustomerSearch for Customer {
+        filters {
+            name_prefix: String => name.starts_with;
+        }
+        sort {
+            id;
+            name;
+        }
+        default_order [id Asc];
+        tie_breaker id Asc;
+        page {
+            default_size: 20;
+            max_size: 100;
+        }
+    }
+}
+
 #[derive(Debug, Model)]
 pub struct AuditEvent {
     #[key]
@@ -88,7 +106,11 @@ pub async fn create_customer(ds_code: &str, id: i64, name: &str) -> Result<Custo
 /// Typical service-layer query.
 pub async fn list_customers(ds_code: &str) -> Result<Vec<Customer>> {
     let mut db = TcMgr::get(ds_code).await?;
-    Ok(Customer::all().exec(&mut db).await?)
+    Ok(CustomerSearch::builder()
+        .asc_name()
+        .build()
+        .all(&mut db)
+        .await?)
 }
 
 /// Best-effort coordination of two database-local transactions.

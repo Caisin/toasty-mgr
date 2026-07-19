@@ -5,11 +5,17 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Multi-data-source manager for Toasty backed by a built-in base_ds model"
 
+[workspace]
+members = ["toasty-mgr-macros"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1"
+bon = "3.9"
 pastey = "0.2.3"
 tokio = { version = "1", features = ["sync"] }
 toasty = "0.8.0"
+toasty-mgr-macros = { path = "toasty-mgr-macros" }
 tracing = "0.1"
 url = "2.5"
 

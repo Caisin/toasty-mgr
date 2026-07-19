@@ -145,6 +145,45 @@ pub async fn create_customer(
 `get` 返回可克隆的 Toasty `Db` handle。第一次调用发生缓存未命中时才读取
 `base_ds` 并建立连接池；后续调用直接从进程内缓存返回。
 
+需要把 API 请求转换成动态条件时，为该请求声明查询规格，不需要修改模型：
+
+```rust,ignore
+toasty_mgr::tc_query_spec! {
+    pub CustomerSearch for Customer {
+        filters {
+            name_prefix: String => name.starts_with;
+        }
+        sort {
+            id;
+            name;
+        }
+        default_order [id Asc];
+        tie_breaker id Asc;
+        page {
+            default_size: 20;
+            max_size: 100;
+        }
+    }
+}
+
+pub async fn search_customers(
+    ds_code: &str,
+    name_prefix: Option<String>,
+) -> anyhow::Result<toasty_mgr::query::Page<Customer>> {
+    let mut db = TcMgr::get(ds_code).await?;
+    Ok(CustomerSearch::builder()
+        .maybe_name_prefix(name_prefix)
+        .asc_name()
+        .build()
+        .fetch_page(&mut db)
+        .await?)
+}
+```
+
+`.filter(expr)` 可以追加租户、权限或关系条件。宏只生成规格里声明的条件；其他条件继续
+使用 Toasty 原生 `Model::fields()` 构造。`count()` 和 `all()` 不应用 page/size，只有
+`fetch_page()` 执行 offset 分页。
+
 ## 7. 应用启动顺序
 
 推荐顺序固定为：

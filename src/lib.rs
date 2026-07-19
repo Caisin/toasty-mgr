@@ -7,6 +7,7 @@ extern crate self as toasty_mgr;
 
 pub mod base_ds;
 pub mod ext;
+pub mod query;
 pub mod registry;
 pub mod transaction;
 
@@ -14,9 +15,13 @@ pub mod transaction;
 pub use anyhow;
 pub use base_ds::{BaseDs, PasswordResolver};
 #[doc(hidden)]
+pub use bon;
+#[doc(hidden)]
 pub use pastey;
+pub use query::{Page, Paging, TcQueryBuildError, TcQueryError};
 pub use registry::{TcConn, TcConnMeta, TcConnections, TcDbAliases, TcModelSets};
 pub use toasty::*;
+pub use toasty_mgr_macros::{TcQuery, tc_query_spec};
 pub use transaction::{TcTx, TcTxMgr};
 
 /// Code reserved for the control data source containing the `base_ds` table.

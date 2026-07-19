@@ -23,6 +23,10 @@ RUSTDOCFLAGS='-D warnings' cargo doc --all-features --no-deps
 `tests/doc_templates.rs` 会编译 `docs/templates/` 中的 Rust 示例，保证文档使用的
 类型名和方法名与公共 API 一致。
 
+`tests/query_spec.rs` 分别验证独立的 `tc_query_spec!`、可选的 `TcQuery` derive、关系
+字段排除、字符串借用输入、重复排序错误，以及 SQLite/Turso 上的条件、count、all 和
+offset 分页行为。
+
 ## 本地 MySQL
 
 测试凭据通过环境变量传入，不写入源码：

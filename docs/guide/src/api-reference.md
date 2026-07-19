@@ -72,3 +72,71 @@ let tx = txs.tenant_a().await?;
 
 宏生成 `TcMgrExt` 和 `TcTxMgrExt` trait。使用生成方法的模块需要把对应 trait 引入
 作用域。动态租户通常直接使用 `set_models` 和 `get(code)`，不需要生成方法。
+
+## 查询规格
+
+`tc_query_spec!` 根据显式白名单生成动态查询参数。它不要求模型 derive `TcQuery`：
+
+```rust,ignore
+toasty_mgr::tc_query_spec! {
+    pub CustomerSearch for Customer {
+        filters {
+            name_prefix: String => name.starts_with;
+            active: bool => active.eq;
+        }
+        sort {
+            id;
+            name;
+        }
+        default_order [id Asc];
+        tie_breaker id Asc;
+        page {
+            default_size: 20;
+            max_size: 100;
+        }
+    }
+}
+
+let request = CustomerSearch::builder()
+    .name_prefix("Al")
+    .asc_name()
+    .filter(Customer::fields().id().gt(100))
+    .build();
+```
+
+只有 `filters` 必填。`sort`、`default_order`、`tie_breaker`、`page` 可以依次省略；省略后
+不会生成对应 setter 或附加隐藏排序。分页未声明稳定排序时，跨页结果可能随数据库返回
+顺序变化。
+
+生成结构体提供：
+
+| API | 行为 |
+|---|---|
+| `into_expr()` | 只构造筛选 `Expr<bool>` |
+| `into_query()` | 构造筛选和排序后的 `QueryMany<Model>`，不分页 |
+| `count(executor)` | 只应用筛选，忽略排序和分页字段 |
+| `all(executor)` | 应用筛选和排序，不应用分页字段 |
+| `fetch_page(executor)` | 校验 1-based page/size，返回 `query::Page<Model>` |
+| `filter(expr)` | 追加任意 Toasty `Expr<bool>`，可以重复调用 |
+
+省略 `page { ... }` 时不生成 `page`、`size` setter 和 `fetch_page()`。`Paging` 表示已
+校验的请求页，`Page<T>` 包含 `items`、`paging`、`total` 和 `total_pages`。
+
+需要直接扩展 Toasty query builder 时，可以按模型选择性 derive `TcQuery`：
+
+```rust,ignore
+#[derive(Debug, toasty_mgr::Model, toasty_mgr::TcQuery)]
+pub struct Customer {
+    #[key]
+    pub id: i64,
+    pub name: String,
+}
+
+use crate::models::CustomerTcQueryExt;
+
+let query = Customer::all().name_starts_with("Al").asc_id();
+```
+
+`TcQuery` 只处理数据库字段，自动忽略 `belongs_to`、`has_one` 和 `has_many` 关系字段。
+它生成 `{Model}TcQueryExt` extension trait；跨模块调用链式方法时必须导入该 trait。
+`tc_query_spec!` 与 `TcQuery` 没有生成代码依赖，可以单独使用。
