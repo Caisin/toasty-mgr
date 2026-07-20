@@ -18,7 +18,8 @@ toasty = "0.8.0"
 toasty-mgr-macros = {version="0.1.0", path = "toasty-mgr-macros" }
 tracing = "0.1"
 url = "2.5"
-
+[patch.crates-io]
+toasty = {git="https://github.com/tokio-rs/toasty.git",branch="main"}
 [features]
 default = []
 mysql = ["toasty/mysql"]
