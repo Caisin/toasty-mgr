@@ -564,7 +564,7 @@ impl QuerySpec {
 
             #[derive(Debug, #root::bon::Builder, #root::serde::Deserialize)]
             #[builder(crate = #root::bon, on(String, into))]
-            #[serde(crate = #serde_path, rename_all = "camelCase", deny_unknown_fields)]
+            #[serde(crate = #serde_path, rename_all = "snake_case", deny_unknown_fields)]
             #vis struct #name {
                 #[serde(skip)]
                 #[builder(field = Vec::new())]

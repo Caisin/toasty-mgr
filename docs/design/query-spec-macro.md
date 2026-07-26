@@ -338,7 +338,7 @@ implied-bounds feature。函数式过程宏直接生成方法标识符，`sort {
 生成类型实现 `Debug`、`Deserialize` 和手写 `Default`，其中 `default()` 委托给 bon builder，确保分页
 默认值与 `.builder().build()` 一致，不会被派生 `Default` 重置为 `0`。bon 的 typestate
 在编译期拒绝对同一 setter 的重复调用；`build()` 因全部字段为 optional/default 而始终
-可用。反序列化字段使用 camelCase；`sort` 只接受 `sort` 区块声明的 snake_case 字段，
+可用。反序列化字段使用 snake_case；`sort` 只接受 `sort` 区块声明的 snake_case 字段，
 `descending=true` 选择降序。`in_list` 与 `between` 的 URL 值使用逗号分隔。未知参数和
 未知排序字段在反序列化阶段被拒绝。宏不依赖具体 Web 框架。
 

@@ -229,7 +229,7 @@ fn generated_default_uses_declared_page_values() {
 #[test]
 fn query_spec_deserializes_http_query_parameters_directly() {
     let request: CustomerSearch = serde_urlencoded::from_str(
-        "namePrefix=Al&state=true&sort=name&descending=true&page=2&size=25",
+        "name_prefix=Al&state=true&sort=name&descending=true&page=2&size=25",
     )
     .unwrap();
 
@@ -243,7 +243,7 @@ fn query_spec_deserializes_http_query_parameters_directly() {
 #[test]
 fn query_spec_deserializes_list_and_range_filters() {
     let request: CustomerSearch =
-        serde_urlencoded::from_str("ids=1,2,3&createdRange=10,20").unwrap();
+        serde_urlencoded::from_str("ids=1,2,3&created_range=10,20").unwrap();
 
     assert_eq!(request.ids, Some(vec![1, 2, 3]));
     assert_eq!(request.created_range, Some((10, 20)));

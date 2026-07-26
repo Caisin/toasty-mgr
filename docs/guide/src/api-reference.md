@@ -127,9 +127,9 @@ async fn list(
 }
 ```
 
-筛选参数使用 camelCase，例如 `namePrefix=Al`。排序使用声明过的 snake_case 字段，
+筛选参数使用 snake_case，例如 `name_prefix=Al`。排序同样使用声明过的 snake_case 字段，
 例如 `sort=name&descending=true`。`in_list` 和 `between` 分别使用 `ids=1,2,3`、
-`createdRange=10,20`。未知参数或未进入 `sort` 白名单的字段会在提取阶段失败。
+`created_range=10,20`。未知参数或未进入 `sort` 白名单的字段会在提取阶段失败。
 
 只有 `filters` 必填。`sort`、`default_order`、`tie_breaker`、`page` 配置可以依次省略。
 省略排序区块后不会生成对应 setter 或附加隐藏排序。省略 `page` 配置时仍生成 `.page()`、
