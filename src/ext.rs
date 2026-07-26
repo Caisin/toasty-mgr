@@ -106,12 +106,9 @@ impl TcMgr {
         TcModelSets::get(code)
     }
 
-    /// Merge every registered model set into `code` and return the former source codes.
-    ///
-    /// The source-specific registrations are removed so callers can install them as aliases
-    /// that share the target [`Db`]. Call this before connecting the target data source.
-    pub fn consolidate_models_into(code: &str) -> Result<Vec<String>> {
-        TcModelSets::consolidate_into(code)
+    /// Return the explicitly registered model source codes in stable order.
+    pub fn model_codes() -> Vec<String> {
+        TcModelSets::codes()
     }
 
     /// Register the control connection using the built-in [`BaseDs`] model set.
