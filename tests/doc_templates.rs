@@ -11,3 +11,12 @@ mod application {
 mod local_database_test {
     include!("../docs/templates/local-database-test.rs");
 }
+
+mod toasty_model {
+    include!("../docs/templates/toasty-model.rs");
+
+    #[test]
+    fn registers_complete_model_set() {
+        let _ = model_set();
+    }
+}

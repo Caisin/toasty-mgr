@@ -35,7 +35,7 @@ service code <------------------------------------------+
 
 ## 依赖边界
 
-本 crate 直接使用 crates.io 的 `toasty = "0.8.0"`，没有 KX crate、SeaORM，
+本 crate 直接使用 crates.io 的 `toasty = "0.9.0"`，没有 KX crate、SeaORM，
 也不直接依赖 `toasty-driver-postgresql`。数据库支持通过 `sqlite`、`turso`、
 `mysql`、`postgresql` Cargo feature 转发给 Toasty；启用 `postgresql` 时由 Toasty
 在其内部传递选择对应 driver。

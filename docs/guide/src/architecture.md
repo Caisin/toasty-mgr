@@ -77,7 +77,7 @@ application (may use SeaORM)
   |
   +-- toasty-mgr
         |
-        +-- toasty 0.8.0
+        +-- toasty 0.9.0
               +-- enabled built-in driver features
 ```
 

@@ -1,7 +1,9 @@
 # toasty-mgr documentation
 
 These docs explain how an application integrates and operates `toasty-mgr`.
-They intentionally do not duplicate Toasty's model and CRUD guide.
+The guide chapters do not duplicate Toasty's model and CRUD guide. A focused,
+compile-checked model template supports the repository-local `write-model`
+skill.
 
 Start here:
 
@@ -27,6 +29,8 @@ Compile-checked Rust templates live in [`templates/`](./templates/):
 - [`bootstrap.rs`](./templates/bootstrap.rs): minimal startup and provisioning.
 - [`local-database-test.rs`](./templates/local-database-test.rs): ignored local
   MySQL/PostgreSQL integration test.
+- [`toasty-model.rs`](./templates/toasty-model.rs): Toasty 0.9 model patterns,
+  relationships, storage choices, and generated query APIs.
 - [`design.md`](./templates/design.md): user-facing design proposal structure.
 
 Repository-local authoring and testing skills live under

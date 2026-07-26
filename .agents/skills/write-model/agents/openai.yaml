@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Toasty Model"
+  short_description: "Design compile-checked Toasty models for real requirements"
+  default_prompt: "Use $write-model to design a Toasty model from these storage, query, relationship, and backend requirements."

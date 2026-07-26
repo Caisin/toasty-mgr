@@ -5,7 +5,7 @@ connection configuration in the built-in `base_ds` table of a reserved `base`
 database, registers the Toasty models compiled into the application, and asks
 for a `Db` by data-source code.
 
-The crate depends on `toasty = "0.8.0"`. It does not depend on KX crates or
+The crate depends on `toasty = "0.9.0"`. It does not depend on KX crates or
 SeaORM and has no direct `toasty-driver-postgresql` dependency, so it can be
 used by an application that already has its own SeaORM dependency. Enabling
 `postgresql` lets Toasty select its own driver transitively.
