@@ -20,6 +20,54 @@ TcTxMgr::transaction("tenant_a", async |tx| {
 
 回调返回 `Ok` 时提交，返回 `Err` 时回滚。获取连接或开始事务失败时回调不会运行。
 
+## 可重试事务
+
+乐观并发更新应重试完整事务，而不是只重放最后一条 update：
+
+```rust,ignore
+const MAX_ATTEMPTS: usize = 3;
+
+TcTxMgr::transaction_on_condition_failed(
+    "tenant_a",
+    MAX_ATTEMPTS,
+    async move |tx| {
+        let mut customer = Customer::get_by_id(tx, &customer_id).await?;
+        customer.name.clone_from(&new_name);
+        customer.update().exec(tx).await?;
+        Ok(customer)
+    },
+)
+.await?;
+```
+
+`max_attempts` 包含第一次执行且必须大于零。每次失败事务完成回滚后才开始下一次；
+`transaction_on_condition_failed` 只重试 Toasty condition-failed，包括包裹在
+`anyhow` context 中的错误，验证错误和其他 driver 错误立即返回。需要自定义临时错误
+分类时使用 `transaction_with_retry(code, max_attempts, should_retry, callback)`。
+
+可重试 callback 是 `AsyncFnMut`。它必须拥有跨 attempt 使用的数据；需要借用请求时，
+在 `async move` callback 内为当前 attempt clone 一份请求，不能长期持有 handler 栈引用。
+
+## 可复用执行函数
+
+只需要执行 Toasty 语句、不负责开启或提交事务的内部函数使用 Toasty 自身的动态边界：
+
+```rust,ignore
+use toasty_mgr::Executor;
+
+async fn save_customer(
+    executor: &mut dyn Executor,
+    customer: &mut Customer,
+) -> anyhow::Result<()> {
+    customer.update().exec(executor).await?;
+    Ok(())
+}
+```
+
+`&mut dyn Executor` 同时接受 `Db`、`Transaction` 和 `TcTx`。不能使用 `&E`，因为
+Toasty 执行和开启事务都要求独占的可变借用。只有事务入口负责原子性；helper 接受
+`Executor` 不代表多表写入可以脱离事务调用。
+
 ## 多数据源事务
 
 ```rust,ignore

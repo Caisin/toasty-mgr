@@ -45,6 +45,8 @@
 | API | 作用 |
 |---|---|
 | `TcTxMgr::transaction(code, callback)` | 单数据源事务回调 |
+| `TcTxMgr::transaction_with_retry(code, max_attempts, predicate, callback)` | 按调用方错误分类重试完整单数据源事务 |
+| `TcTxMgr::transaction_on_condition_failed(code, max_attempts, callback)` | 仅在 Toasty 乐观并发冲突时重试完整事务 |
 | `TcTxMgr::t(callback)` | 新建管理器并执行多数据源回调 |
 | `TcTxMgr::new().trans(callback)` | 使用显式管理器执行回调 |
 | `tx.get_tx(code)` | 按需打开并返回一个 `TcTx` |
