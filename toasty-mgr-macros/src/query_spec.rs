@@ -8,7 +8,7 @@ use syn::{
     parse2,
 };
 
-use super::tc_query::runtime_crate_path;
+use super::tc_query::{runtime_crate_path, runtime_reexport_path};
 
 pub(crate) fn expand(tokens: TokenStream) -> syn::Result<TokenStream> {
     let input = parse2::<QuerySpec>(tokens)?;
@@ -220,7 +220,7 @@ impl QuerySpec {
             .iter()
             .map(|filter| filter.name.to_string())
             .collect::<HashSet<_>>();
-        for reserved in ["filter", "extra_filters", "orders"] {
+        for reserved in ["filter", "extra_filters", "orders", "sort", "descending"] {
             if !method_names.insert(reserved.to_owned()) {
                 combine_error(
                     &mut errors,
@@ -255,17 +255,42 @@ impl QuerySpec {
 
     fn expand(&self) -> syn::Result<TokenStream> {
         let root = runtime_crate_path()?;
+        let serde_path = runtime_reexport_path("serde")?;
+        let csv_deserializer = runtime_reexport_path("query::deserialize_optional_csv")?;
+        let range_deserializer = runtime_reexport_path("query::deserialize_optional_range")?;
         let vis = &self.vis;
         let name = &self.name;
         let model = &self.model;
         let builder = format_ident!("{}Builder", name);
         let builder_module = format_ident!("{}_builder", to_snake_case(&name.to_string()));
         let order_type = format_ident!("{}Order", name);
+        let sort_field_type = format_ident!("{}SortField", name);
+        let default_page_fn = format_ident!(
+            "__tc_query_{}_default_page",
+            to_snake_case(&name.to_string())
+        );
+        let default_size_fn = format_ident!(
+            "__tc_query_{}_default_size",
+            to_snake_case(&name.to_string())
+        );
+        let default_page_path =
+            syn::LitStr::new(&default_page_fn.to_string(), default_page_fn.span());
+        let default_size_path =
+            syn::LitStr::new(&default_size_fn.to_string(), default_size_fn.span());
 
         let filter_fields = self.filters.iter().map(|filter| {
             let name = &filter.name;
             let ty = &filter.ty;
-            quote!(#name: Option<#ty>,)
+            let deserialize = match filter.operation {
+                FilterOperation::Between => {
+                    quote!(#[serde(default, deserialize_with = #range_deserializer)])
+                }
+                FilterOperation::InList => {
+                    quote!(#[serde(default, deserialize_with = #csv_deserializer)])
+                }
+                _ => TokenStream::new(),
+            };
+            quote!(#deserialize #name: Option<#ty>,)
         });
         let (default_size, max_size) = self.page.as_ref().map_or_else(
             || (quote!(10_u64), quote!(100_u64)),
@@ -277,14 +302,60 @@ impl QuerySpec {
         );
         let page_fields = quote! {
             #[builder(default = 1)]
+            #[serde(default = #default_page_path)]
             page: u64,
             #[builder(default = #default_size)]
+            #[serde(default = #default_size_path)]
             size: u64,
         };
         let order_variants = self.sorts.iter().map(|field| {
             let variant = order_variant(field);
             quote!(#variant(#root::query::TcQuerySortDirection),)
         });
+        let sort_field_variants = self.sorts.iter().map(order_variant);
+        let http_order_arms = self.sorts.iter().map(|field| {
+            let variant = order_variant(field);
+            quote! {
+                #sort_field_type::#variant => #order_type::#variant(if descending {
+                    #root::query::TcQuerySortDirection::Desc
+                } else {
+                    #root::query::TcQuerySortDirection::Asc
+                }),
+            }
+        });
+        let destructured_sort_fields = if self.sorts.is_empty() {
+            TokenStream::new()
+        } else {
+            quote!(sort, descending,)
+        };
+        let (sort_transport_fields, sort_field_definition, append_http_order) =
+            if self.sorts.is_empty() {
+                (TokenStream::new(), TokenStream::new(), TokenStream::new())
+            } else {
+                (
+                    quote! {
+                        #[builder(field)]
+                        sort: Option<#sort_field_type>,
+                        #[serde(default)]
+                        #[builder(field)]
+                        descending: bool,
+                    },
+                    quote! {
+                        #[derive(Debug, #root::serde::Deserialize)]
+                        #[serde(crate = #serde_path, rename_all = "snake_case")]
+                        enum #sort_field_type {
+                            #( #sort_field_variants, )*
+                        }
+                    },
+                    quote! {
+                        if let Some(sort) = sort {
+                            orders.push(match sort {
+                                #( #http_order_arms )*
+                            });
+                        }
+                    },
+                )
+            };
         let order_field_arms = self.sorts.iter().map(|field| {
             let variant = order_variant(field);
             quote!(Self::#variant(_) => stringify!(#field),)
@@ -483,13 +554,25 @@ impl QuerySpec {
         };
 
         Ok(quote! {
-            #[derive(Debug, #root::bon::Builder)]
+            fn #default_page_fn() -> u64 {
+                1
+            }
+
+            fn #default_size_fn() -> u64 {
+                #default_size
+            }
+
+            #[derive(Debug, #root::bon::Builder, #root::serde::Deserialize)]
             #[builder(crate = #root::bon, on(String, into))]
+            #[serde(crate = #serde_path, rename_all = "camelCase", deny_unknown_fields)]
             #vis struct #name {
+                #[serde(skip)]
                 #[builder(field = Vec::new())]
                 extra_filters: Vec<#root::stmt::Expr<bool>>,
+                #[serde(skip)]
                 #[builder(field = Vec::new())]
                 orders: Vec<#order_type>,
+                #sort_transport_fields
                 #( #filter_fields )*
                 #page_fields
             }
@@ -498,6 +581,8 @@ impl QuerySpec {
             enum #order_type {
                 #( #order_variants )*
             }
+
+            #sort_field_definition
 
             #order_field_impl
 
@@ -525,11 +610,13 @@ impl QuerySpec {
                 fn into_parts(self) -> (#root::stmt::Expr<bool>, Vec<#order_type>) {
                     let Self {
                         #( #destructured_filters, )*
+                        #destructured_sort_fields
                         mut extra_filters,
-                        orders,
+                        mut orders,
                         ..
                     } = self;
                     #( #filter_expressions )*
+                    #append_http_order
                     (#root::stmt::Expr::and_all(extra_filters), orders)
                 }
 

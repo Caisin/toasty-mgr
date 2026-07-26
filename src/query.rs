@@ -2,8 +2,41 @@
 
 use std::{error::Error, fmt};
 
+use serde::Deserialize;
+
+#[doc(hidden)]
+pub fn deserialize_optional_csv<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    let value = String::deserialize(deserializer)?;
+    value
+        .split(',')
+        .map(|item| item.trim().parse().map_err(serde::de::Error::custom))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+#[doc(hidden)]
+pub fn deserialize_optional_range<'de, D, T>(deserializer: D) -> Result<Option<(T, T)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    let value = String::deserialize(deserializer)?;
+    let (low, high) = value
+        .split_once(',')
+        .ok_or_else(|| serde::de::Error::custom("expected two comma-separated values"))?;
+    let low = low.trim().parse().map_err(serde::de::Error::custom)?;
+    let high = high.trim().parse().map_err(serde::de::Error::custom)?;
+    Ok(Some((low, high)))
+}
+
 /// One-based offset pagination request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Paging {
     /// One-based page number.
     pub page: u64,
@@ -12,7 +45,7 @@ pub struct Paging {
 }
 
 /// Offset-paginated query result.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Page<T> {
     /// Records in the requested page.
     pub items: Vec<T>,

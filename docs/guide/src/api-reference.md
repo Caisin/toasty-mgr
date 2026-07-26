@@ -104,6 +104,23 @@ let request = CustomerSearch::builder()
     .build();
 ```
 
+生成类型也直接实现 serde `Deserialize`，可作为 Axum 查询参数，无需中间 DTO：
+
+```rust,ignore
+async fn list(
+    axum::extract::Query(query): axum::extract::Query<CustomerSearch>,
+) -> anyhow::Result<()> {
+    let mut db = toasty_mgr::TcMgr::get("customer").await?;
+    let page = query.fetch_page(&mut db).await?;
+    // map page into the API response
+    Ok(())
+}
+```
+
+筛选参数使用 camelCase，例如 `namePrefix=Al`。排序使用声明过的 snake_case 字段，
+例如 `sort=name&descending=true`。`in_list` 和 `between` 分别使用 `ids=1,2,3`、
+`createdRange=10,20`。未知参数或未进入 `sort` 白名单的字段会在提取阶段失败。
+
 只有 `filters` 必填。`sort`、`default_order`、`tie_breaker`、`page` 配置可以依次省略。
 省略排序区块后不会生成对应 setter 或附加隐藏排序。省略 `page` 配置时仍生成 `.page()`、
 `.size()` 和 `fetch_page()`，默认第一页、每页 10 条、最大 100 条。分页未声明稳定排序

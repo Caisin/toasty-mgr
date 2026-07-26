@@ -226,6 +226,35 @@ fn generated_default_uses_declared_page_values() {
     assert_eq!(request.size, 20);
 }
 
+#[test]
+fn query_spec_deserializes_http_query_parameters_directly() {
+    let request: CustomerSearch = serde_urlencoded::from_str(
+        "namePrefix=Al&state=true&sort=name&descending=true&page=2&size=25",
+    )
+    .unwrap();
+
+    assert_eq!(request.name_prefix.as_deref(), Some("Al"));
+    assert_eq!(request.state, Some(true));
+    assert_eq!(request.page, 2);
+    assert_eq!(request.size, 25);
+    let _: toasty_mgr::schema::QueryMany<SearchCustomer> = request.into_query().unwrap();
+}
+
+#[test]
+fn query_spec_deserializes_list_and_range_filters() {
+    let request: CustomerSearch =
+        serde_urlencoded::from_str("ids=1,2,3&createdRange=10,20").unwrap();
+
+    assert_eq!(request.ids, Some(vec![1, 2, 3]));
+    assert_eq!(request.created_range, Some((10, 20)));
+}
+
+#[test]
+fn query_spec_rejects_unknown_sort_fields_and_parameters() {
+    assert!(serde_urlencoded::from_str::<CustomerSearch>("sort=password").is_err());
+    assert!(serde_urlencoded::from_str::<CustomerSearch>("unknown=value").is_err());
+}
+
 #[cfg(any(feature = "sqlite", feature = "turso"))]
 async fn assert_query_spec_backend(code: &str, url: &str) -> anyhow::Result<()> {
     let mut db =

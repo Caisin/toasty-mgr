@@ -261,6 +261,20 @@ pub(crate) fn runtime_crate_path() -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
+pub(crate) fn runtime_reexport_path(name: &str) -> syn::Result<LitStr> {
+    let root = match crate_name("toasty-mgr") {
+        Ok(FoundCrate::Itself) => "::toasty_mgr".to_owned(),
+        Ok(FoundCrate::Name(name)) => format!("::{name}"),
+        Err(error) => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                format!("failed to locate toasty-mgr: {error}"),
+            ));
+        }
+    };
+    Ok(LitStr::new(&format!("{root}::{name}"), Span::call_site()))
+}
+
 fn is_relation(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         ["belongs_to", "has_one", "has_many"]

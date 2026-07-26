@@ -20,6 +20,8 @@ pub use bon;
 pub use pastey;
 pub use query::{Page, Paging, TcQueryBuildError, TcQueryError};
 pub use registry::{TcConn, TcConnMeta, TcConnections, TcDbAliases, TcModelSets};
+#[doc(hidden)]
+pub use serde;
 pub use toasty::*;
 pub use toasty_mgr_macros::{TcQuery, tc_query_spec};
 pub use transaction::{TcTx, TcTxMgr};

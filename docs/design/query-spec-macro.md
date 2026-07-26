@@ -51,6 +51,7 @@ let query = toasty_mgr::query!(
 宏本身不增加 Cargo feature。实现增加：
 
 - `bon = "3.9"`，当前 lockfile 解析为 `bon 3.9.3`。
+- `serde = "1"`，用于让函数式查询规格直接成为 HTTP/RPC 输入类型。
 - workspace 成员 `toasty-mgr-macros`，同时实现 `TcQuery` derive 和函数式
   `tc_query_spec!`，两个入口使用独立的解析与生成模块。
 - proc-macro 实现依赖 `syn`、`quote`、`proc-macro2` 和 `proc-macro-crate`。
@@ -62,8 +63,8 @@ let query = toasty_mgr::query!(
 toasty-mgr = { path = "../toasty-mgr", features = ["postgresql"] }
 ```
 
-`sqlite`、`turso`、`mysql` 和 `postgresql` feature 的含义不变。第一版不增加
-`serde` feature；HTTP 或 RPC 层负责把外部字符串转换为生成的排序枚举。
+`sqlite`、`turso`、`mysql` 和 `postgresql` feature 的含义不变。`tc_query_spec!`
+生成的结构体直接实现 `Deserialize`；调用方不需要再定义一套传输 DTO 或排序枚举。
 
 `toasty-mgr` 通过 `pub use toasty_mgr_macros::{TcQuery, tc_query_spec}` 重导出两个宏。
 宏 crate 不依赖运行时 crate，使用 `proc-macro-crate` 解析下游对 `toasty-mgr` 的实际
@@ -334,10 +335,12 @@ impl<S: customer_search_builder::State> CustomerSearchBuilder<S> {
 implied-bounds feature。函数式过程宏直接生成方法标识符，`sort { created_at; }` 对应
 `.asc_created_at()` 和 `.desc_created_at()`。
 
-生成类型实现 `Debug` 和手写 `Default`，其中 `default()` 委托给 bon builder，确保分页
+生成类型实现 `Debug`、`Deserialize` 和手写 `Default`，其中 `default()` 委托给 bon builder，确保分页
 默认值与 `.builder().build()` 一致，不会被派生 `Default` 重置为 `0`。bon 的 typestate
 在编译期拒绝对同一 setter 的重复调用；`build()` 因全部字段为 optional/default 而始终
-可用。不自动实现序列化 trait，避免强制应用选择 `serde` 或任何 Web 框架。
+可用。反序列化字段使用 camelCase；`sort` 只接受 `sort` 区块声明的 snake_case 字段，
+`descending=true` 选择降序。`in_list` 与 `between` 的 URL 值使用逗号分隔。未知参数和
+未知排序字段在反序列化阶段被拒绝。宏不依赖具体 Web 框架。
 
 ### 构建并执行
 
@@ -659,7 +662,7 @@ Cursor 分页可以作为独立设计加入，不能复用 offset 的页码响�
 
 ### String-based generic builder
 
-不接受 `HashMap<String, Value>`、`sort=name,-created_at` 直接映射数据库字段，也不通过
+不接受 `HashMap<String, Value>` 或未声明的字符串直接映射数据库字段，也不通过
 `Model::field_name_to_id` 动态构造表达式。字符串方案会丢失字段和值的编译期类型检查，
 扩大非法字段、后端差异和注入类错误的处理面。
 
