@@ -291,6 +291,28 @@ impl TcModelSets {
     pub fn remove(code: &str) {
         write(model_sets()).remove(code);
     }
+
+    pub(crate) fn consolidate_into(code: &str) -> AnyResult<Vec<String>> {
+        let mut registered = write(model_sets());
+        let mut target = registered
+            .remove(code)
+            .or_else(|| (code == crate::BASE).then(|| crate::models!(BaseDs)))
+            .ok_or_else(|| anyhow!("models for data source [{code}] not set"))?;
+
+        let mut sources = registered.drain().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut source_codes = Vec::with_capacity(sources.len());
+        for (source_code, models) in sources {
+            source_codes.push(source_code);
+            for model in models {
+                target.add(model);
+            }
+        }
+
+        registered.insert(code.to_owned(), target);
+        Ok(source_codes)
+    }
 }
 
 /// Process-wide Toasty connection registry.
@@ -569,6 +591,8 @@ fn positive_timeout_secs(value: Option<i64>) -> Option<Duration> {
 mod tests {
     use super::*;
 
+    static MODEL_SET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn managed_connection_remains_an_executor() {
         fn assert_executor<T: Executor>() {}
@@ -578,8 +602,23 @@ mod tests {
 
     #[test]
     fn base_model_set_is_always_available() {
+        let _guard = MODEL_SET_TEST_LOCK.lock().unwrap();
         TcModelSets::remove(crate::BASE);
         assert!(TcModelSets::get(crate::BASE).is_ok());
+    }
+
+    #[test]
+    fn model_sets_can_be_consolidated_under_one_source() {
+        let _guard = MODEL_SET_TEST_LOCK.lock().unwrap();
+        let source_code = "registry-consolidation-test";
+        TcModelSets::set(source_code, crate::models!(BaseDs));
+
+        let source_codes = TcModelSets::consolidate_into(crate::BASE).unwrap();
+
+        assert!(source_codes.contains(&source_code.to_owned()));
+        assert!(TcModelSets::get_opt(source_code).is_none());
+        assert!(TcModelSets::get(crate::BASE).is_ok());
+        TcModelSets::remove(crate::BASE);
     }
 
     #[test]

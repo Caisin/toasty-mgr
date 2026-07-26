@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "toasty-mgr"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "bon",
