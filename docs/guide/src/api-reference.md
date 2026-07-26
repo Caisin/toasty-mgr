@@ -44,11 +44,10 @@
 
 | API | 作用 |
 |---|---|
-| `TcTxMgr::transaction(code, callback)` | 单数据源事务回调 |
-| `TcTxMgr::transaction_with_retry(code, max_attempts, predicate, callback)` | 按调用方错误分类重试完整单数据源事务 |
-| `TcTxMgr::transaction_on_condition_failed(code, max_attempts, callback)` | 仅在 Toasty 乐观并发冲突时重试完整事务 |
-| `TcTxMgr::t(callback)` | 新建管理器并执行多数据源回调 |
-| `TcTxMgr::new().trans(callback)` | 使用显式管理器执行回调 |
+| `TcTxMgr::trans(code, callback)` | 动态单数据源事务回调 |
+| `TcTxMgr::trans_with_retry(code, max_attempts, predicate, callback)` | 按调用方错误分类重试完整单数据源事务 |
+| `TcTxMgr::trans_on_condition_failed(code, max_attempts, callback)` | 仅在 Toasty 乐观并发冲突时重试完整事务 |
+| `TcTxMgr::coordinate(callback)` | 协调多数据源事务回调，按顺序提交 |
 | `tx.get_tx(code)` | 按需打开并返回一个 `TcTx` |
 | `tx.get_txs([codes])` | 按需打开并返回多个不同编码的 `TcTx` |
 | `tx.use_tx(code)` / `tx.use_txs([codes])` | 预先打开事务 |
@@ -67,13 +66,22 @@ toasty_mgr::tc_mgr_ext!(
 
 TcMgr::init_tenant_a_models();
 let db = TcMgr::tenant_a().await?;
+TcMgr::tenant_a_trans(async |tx| {
+    // Execute an atomic transaction on tenant_a.
+    Ok(())
+}).await?;
 
-let mut txs = TcTxMgr::new();
-let tx = txs.tenant_a().await?;
+TcTxMgr::coordinate(async |txs| {
+    let tx = txs.tenant_a().await?;
+    // Coordinate tenant_a with other data sources here.
+    Ok(())
+}).await?;
 ```
 
 宏生成 `TcMgrExt` 和 `TcTxMgrExt` trait。使用生成方法的模块需要把对应 trait 引入
-作用域。动态租户通常直接使用 `set_models` 和 `get(code)`，不需要生成方法。
+作用域。固定数据源还会生成 `<source>_trans_on_condition_failed` 乐观并发重试入口。
+动态租户通常直接使用 `set_models`、`get(code)` 和 `TcTxMgr::trans(code, callback)`，
+不需要生成方法。
 
 ## 查询规格
 

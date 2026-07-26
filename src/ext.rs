@@ -21,6 +21,36 @@ macro_rules! tc_mgr_ext {
                     async fn $code() -> $crate::anyhow::Result<$crate::Db> {
                         $crate::TcMgr::get(stringify!($code)).await
                     }
+
+                    async fn [<$code _trans>]<F, T>(callback: F) -> $crate::anyhow::Result<T>
+                    where
+                        F: for<'a> ::std::ops::AsyncFnOnce(
+                                &'a mut $crate::Transaction<'_>,
+                            ) -> $crate::anyhow::Result<T>
+                            + Send,
+                        T: Send,
+                    {
+                        $crate::TcTxMgr::trans(stringify!($code), callback).await
+                    }
+
+                    async fn [<$code _trans_on_condition_failed>]<F, T>(
+                        max_attempts: usize,
+                        callback: F,
+                    ) -> $crate::anyhow::Result<T>
+                    where
+                        F: for<'a> ::std::ops::AsyncFnMut(
+                                &'a mut $crate::Transaction<'_>,
+                            ) -> $crate::anyhow::Result<T>
+                            + Send,
+                        T: Send,
+                    {
+                        $crate::TcTxMgr::trans_on_condition_failed(
+                            stringify!($code),
+                            max_attempts,
+                            callback,
+                        )
+                        .await
+                    }
                 )*
             }
         }

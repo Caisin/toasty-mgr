@@ -154,28 +154,24 @@ impl TcTxMgr {
             .map_err(|_| anyhow!("transaction count mismatch"))
     }
 
-    pub async fn t<F, T>(callback: F) -> Result<T>
+    /// Coordinates transactions opened by the callback across data sources.
+    ///
+    /// Commits are sequential, so this is not a distributed atomic transaction.
+    pub async fn coordinate<F, T>(callback: F) -> Result<T>
     where
         F: for<'a> AsyncFnOnce(&'a mut Self) -> Result<T> + Send,
         T: Send,
     {
-        Self::new().trans(callback).await
-    }
-
-    pub async fn trans<F, T>(mut self, callback: F) -> Result<T>
-    where
-        F: for<'a> AsyncFnOnce(&'a mut Self) -> Result<T> + Send,
-        T: Send,
-    {
-        match callback(&mut self).await {
+        let mut manager = Self::new();
+        match callback(&mut manager).await {
             Ok(value) => {
-                for (_, tx) in self.tx_map {
+                for (_, tx) in manager.tx_map {
                     tx.commit().await?;
                 }
                 Ok(value)
             }
             Err(error) => {
-                for (_, tx) in self.tx_map {
+                for (_, tx) in manager.tx_map {
                     tx.rollback().await?;
                 }
                 Err(error)
@@ -183,7 +179,7 @@ impl TcTxMgr {
         }
     }
 
-    pub async fn transaction<F, T>(code: &str, callback: F) -> Result<T>
+    pub async fn trans<F, T>(code: &str, callback: F) -> Result<T>
     where
         F: for<'a> AsyncFnOnce(&'a mut Transaction<'_>) -> Result<T> + Send,
         T: Send,
@@ -207,7 +203,7 @@ impl TcTxMgr {
     /// `max_attempts` includes the first execution. Each failed attempt is rolled
     /// back before the next transaction starts. A zero value is rejected before
     /// acquiring a database connection.
-    pub async fn transaction_with_retry<F, T, P>(
+    pub async fn trans_with_retry<F, T, P>(
         code: &str,
         max_attempts: usize,
         mut should_retry: P,
@@ -225,7 +221,7 @@ impl TcTxMgr {
         }
 
         for attempt in 1..=max_attempts {
-            match Self::transaction(code, async |tx| callback(tx).await).await {
+            match Self::trans(code, async |tx| callback(tx).await).await {
                 Ok(value) => return Ok(value),
                 Err(error) if !should_retry(&error) => return Err(error),
                 Err(_) if attempt < max_attempts => continue,
@@ -244,7 +240,7 @@ impl TcTxMgr {
     ///
     /// This is the preferred entry point for optimistic-concurrency updates.
     /// Validation errors and arbitrary driver failures are returned immediately.
-    pub async fn transaction_on_condition_failed<F, T>(
+    pub async fn trans_on_condition_failed<F, T>(
         code: &str,
         max_attempts: usize,
         callback: F,
@@ -253,7 +249,7 @@ impl TcTxMgr {
         F: for<'a> AsyncFnMut(&'a mut Transaction<'_>) -> Result<T> + Send,
         T: Send,
     {
-        Self::transaction_with_retry(code, max_attempts, Self::is_condition_failed, callback).await
+        Self::trans_with_retry(code, max_attempts, Self::is_condition_failed, callback).await
     }
 
     fn is_condition_failed(error: &anyhow::Error) -> bool {
@@ -292,11 +288,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn async_transaction_callbacks_type_check() {
-        let future = TcTxMgr::new().trans(async |tx| -> Result<i64> {
+    fn coordinated_transaction_callbacks_type_check() {
+        let future = TcTxMgr::coordinate(async |tx| -> Result<i64> {
             let [_sys, _base] = tx.get_txs(["sys", "base"]).await?;
             Ok(1)
         });
+        drop(future);
+    }
+
+    #[test]
+    fn generated_named_transaction_callbacks_type_check() {
+        use crate::TcMgrExt as _;
+
+        let future = TcMgr::base_trans(async |_tx| -> Result<i64> { Ok(1) });
+        drop(future);
+
+        let future = TcMgr::base_trans_on_condition_failed(3, async |_tx| -> Result<i64> { Ok(1) });
         drop(future);
     }
 
@@ -308,31 +315,21 @@ mod tests {
 
     #[test]
     fn retrying_transaction_callbacks_type_check() {
-        let future = TcTxMgr::transaction_with_retry(
-            "base",
-            3,
-            |_| true,
-            async |_tx| -> Result<i64> { Ok(1) },
-        );
+        let future =
+            TcTxMgr::trans_with_retry("base", 3, |_| true, async |_tx| -> Result<i64> { Ok(1) });
         drop(future);
 
         let future =
-            TcTxMgr::transaction_on_condition_failed("base", 3, async |_tx| -> Result<i64> {
-                Ok(1)
-            });
+            TcTxMgr::trans_on_condition_failed("base", 3, async |_tx| -> Result<i64> { Ok(1) });
         drop(future);
     }
 
     #[tokio::test]
     async fn retrying_transaction_rejects_zero_attempts_before_connecting() {
-        let error = TcTxMgr::transaction_with_retry(
-            "missing",
-            0,
-            |_| true,
-            async |_tx| -> Result<()> { Ok(()) },
-        )
-        .await
-        .unwrap_err();
+        let error =
+            TcTxMgr::trans_with_retry("missing", 0, |_| true, async |_tx| -> Result<()> { Ok(()) })
+                .await
+                .unwrap_err();
 
         assert!(error.to_string().contains("at least one attempt"));
     }
@@ -341,7 +338,7 @@ mod tests {
     async fn retrying_transaction_stops_at_the_maximum_attempt_count() {
         let classified = AtomicUsize::new(0);
         let callback_calls = AtomicUsize::new(0);
-        let error = TcTxMgr::transaction_with_retry(
+        let error = TcTxMgr::trans_with_retry(
             crate::BASE,
             3,
             |_| {

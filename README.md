@@ -86,4 +86,4 @@ documents the connection-management layer.
   `sslmode=disable`. Use explicit URL registration for TLS-required sources.
 - `TcTxMgr` coordinates transactions but does not provide distributed atomicity.
 - Reusable statement helpers should accept `&mut dyn Executor`; retry complete
-  optimistic transactions with `transaction_on_condition_failed`.
+  optimistic transactions with `trans_on_condition_failed`.

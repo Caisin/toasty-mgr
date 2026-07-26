@@ -115,7 +115,7 @@ pub async fn list_customers(ds_code: &str) -> Result<Vec<Customer>> {
 
 /// Best-effort coordination of two database-local transactions.
 pub async fn create_customer_with_audit(id: i64, name: &str) -> Result<()> {
-    TcTxMgr::t(async |tx| {
+    TcTxMgr::coordinate(async |tx| {
         let [tenant, audit] = tx.get_txs(["tenant_a", "audit"]).await?;
         toasty_mgr::create!(Customer { id, name })
             .exec(tenant)

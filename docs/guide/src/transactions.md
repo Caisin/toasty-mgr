@@ -6,7 +6,7 @@
 ## 单数据源事务
 
 ```rust,ignore
-TcTxMgr::transaction("tenant_a", async |tx| {
+TcTxMgr::trans("tenant_a", async |tx| {
     toasty_mgr::create!(Customer {
         id: 1,
         name: "Alice",
@@ -27,7 +27,7 @@ TcTxMgr::transaction("tenant_a", async |tx| {
 ```rust,ignore
 const MAX_ATTEMPTS: usize = 3;
 
-TcTxMgr::transaction_on_condition_failed(
+TcTxMgr::trans_on_condition_failed(
     "tenant_a",
     MAX_ATTEMPTS,
     async move |tx| {
@@ -41,9 +41,9 @@ TcTxMgr::transaction_on_condition_failed(
 ```
 
 `max_attempts` 包含第一次执行且必须大于零。每次失败事务完成回滚后才开始下一次；
-`transaction_on_condition_failed` 只重试 Toasty condition-failed，包括包裹在
+`trans_on_condition_failed` 只重试 Toasty condition-failed，包括包裹在
 `anyhow` context 中的错误，验证错误和其他 driver 错误立即返回。需要自定义临时错误
-分类时使用 `transaction_with_retry(code, max_attempts, should_retry, callback)`。
+分类时使用 `trans_with_retry(code, max_attempts, should_retry, callback)`。
 
 可重试 callback 是 `AsyncFnMut`。它必须拥有跨 attempt 使用的数据；需要借用请求时，
 在 `async move` callback 内为当前 attempt clone 一份请求，不能长期持有 handler 栈引用。
@@ -71,7 +71,7 @@ Toasty 执行和开启事务都要求独占的可变借用。只有事务入口�
 ## 多数据源事务
 
 ```rust,ignore
-TcTxMgr::t(async |tx| {
+TcTxMgr::coordinate(async |tx| {
     let [tenant, audit] = tx.get_txs(["tenant_a", "audit"]).await?;
 
     toasty_mgr::create!(Customer { id: 1, name: "Alice" })
@@ -90,21 +90,6 @@ TcTxMgr::t(async |tx| {
 
 同一编码在一个 `TcTxMgr` 中只打开一次。`get_txs` 要求编码唯一，因为它同时返回
 多个可变事务引用；重复编码会直接报错。需要逐个访问时可以使用 `get_tx(code)`。
-
-## 显式管理回调
-
-已有管理器实例时使用 `trans`：
-
-```rust,ignore
-let result = TcTxMgr::new()
-    .trans(async |tx| {
-        tx.use_txs(["tenant_a", "audit"]).await?;
-        let tenant = tx.get("tenant_a")?;
-        // Execute Toasty statements through tenant.
-        Ok::<_, anyhow::Error>(42)
-    })
-    .await?;
-```
 
 不要让 `TcTx` 引用离开回调。`TcTxMgr` 拥有事务并在回调结束后消费它们。
 
