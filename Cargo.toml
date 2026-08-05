@@ -19,8 +19,13 @@ toasty = { version = "0.9.0" }
 toasty-mgr-macros = {version="0.1.0", path = "toasty-mgr-macros" }
 tracing = "0.1"
 url = "2.5"
+
+[patch.crates-io]
+toasty = { git = "https://github.com/tokio-rs/toasty.git", branch = "main" }
+
 [features]
 default = ["postgresql", "toasty/serde"]
+migration = ["toasty/jiff", "toasty/migration", "toasty/rust_decimal"]
 mysql = ["toasty/mysql"]
 postgresql = ["toasty/postgresql"]
 sqlite = ["toasty/sqlite"]

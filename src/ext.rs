@@ -106,9 +106,12 @@ impl TcMgr {
         TcModelSets::get(code)
     }
 
-    /// Return the explicitly registered model source codes in stable order.
+    /// Return all model source codes in stable order, with the implicit base set first.
     pub fn model_codes() -> Vec<String> {
-        TcModelSets::codes()
+        TcModelSets::entries_with_base()
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect()
     }
 
     /// Register the control connection using the built-in [`BaseDs`] model set.

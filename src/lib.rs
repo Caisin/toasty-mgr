@@ -7,6 +7,8 @@ extern crate self as toasty_mgr;
 
 pub mod base_ds;
 pub mod ext;
+#[cfg(feature = "migration")]
+pub mod migration;
 pub mod query;
 pub mod registry;
 pub mod transaction;

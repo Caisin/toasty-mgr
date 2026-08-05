@@ -292,10 +292,18 @@ impl TcModelSets {
         write(model_sets()).remove(code);
     }
 
-    pub(crate) fn codes() -> Vec<String> {
-        let mut codes = read(model_sets()).keys().cloned().collect::<Vec<_>>();
-        codes.sort();
-        codes
+    pub(crate) fn entries_with_base() -> Vec<(String, ModelSet)> {
+        let mut entries = read(model_sets())
+            .iter()
+            .map(|(code, models)| (code.clone(), models.clone()))
+            .collect::<Vec<_>>();
+        if !entries.iter().any(|(code, _)| code == crate::BASE) {
+            entries.push((crate::BASE.to_owned(), crate::models!(BaseDs)));
+        }
+        entries.sort_by(|(left, _), (right, _)| {
+            (left != crate::BASE, left).cmp(&(right != crate::BASE, right))
+        });
+        entries
     }
 }
 
@@ -595,8 +603,9 @@ mod tests {
             TcModelSets::set(code, crate::models!(BaseDs));
         }
 
-        let registered = TcModelSets::codes()
+        let registered = TcModelSets::entries_with_base()
             .into_iter()
+            .map(|(code, _)| code)
             .filter(|code| code.starts_with("registry-code-"))
             .collect::<Vec<_>>();
 
