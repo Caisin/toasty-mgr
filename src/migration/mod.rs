@@ -7,9 +7,10 @@ mod types;
 
 pub use artifact::{ArtifactState, MigrationArtifactSet, OwnedMigrationFile};
 pub use backend::{
-    BackendId, BackendMigration, LedgerMigration, MigrationBackend, MySqlMigrationBackend,
-    ObservedColumn, ObservedIndex, ObservedSchema, ObservedTable, PostgreSqlMigrationBackend,
-    SchemaInspectRequest, SqliteMigrationBackend, TursoMigrationBackend,
+    BackendId, BackendMigration, DdlAtomicity, LedgerMigration, MigrationBackend,
+    MySqlMigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema, ObservedTable,
+    PostgreSqlMigrationBackend, SchemaInspectRequest, SqliteMigrationBackend,
+    TursoMigrationBackend,
 };
 pub use manager::TcMigrationMgr;
 pub use types::{

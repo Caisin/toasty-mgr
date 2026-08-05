@@ -3,17 +3,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::{Context, Result, bail};
 use toasty::{
     Db, Executor,
-    schema::db::{
-        self, Column, ColumnId, Index, IndexColumn, IndexId, IndexOp, IndexScope, PrimaryKey,
-        Table, TableId,
-    },
+    schema::db,
     stmt::{self, Value},
 };
 
 use super::{
-    AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, InspectFuture, LedgerMigration,
-    MigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema, ObservedTable,
-    PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest,
+    AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
+    LedgerMigration, MigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema,
+    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, normalize_observed,
 };
 use crate::migration::SchemaScope;
 
@@ -38,12 +35,22 @@ impl MigrationBackend for PostgreSqlMigrationBackend {
         &["postgres", "postgresql"]
     }
 
+    fn ddl_atomicity(&self) -> DdlAtomicity {
+        DdlAtomicity::Transactional
+    }
+
     fn inspect<'a>(&'a self, request: SchemaInspectRequest<'a>) -> InspectFuture<'a> {
         Box::pin(async move { inspect(request).await })
     }
 
-    fn normalize(&self, observed: &ObservedSchema) -> Result<db::Schema> {
-        observed_to_schema(observed)
+    fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema> {
+        normalize_observed(observed, target, |column, target| {
+            let inferred = postgres_type(column)?;
+            Ok(target
+                .filter(|target| postgres_storage_equivalent(&inferred.1, &target.storage_ty))
+                .map(|target| (target.ty.clone(), target.storage_ty.clone()))
+                .unwrap_or(inferred))
+        })
     }
 
     fn inspect_applied_ids<'a>(
@@ -383,6 +390,7 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
                 data_type: value_string(&row[2])?,
                 native_type: value_string(&row[3])?,
                 nullable: value_string(&row[4])? == "YES",
+                auto_increment: default.starts_with("nextval("),
                 default: (!default.is_empty()).then_some(default),
                 ordinal: usize::try_from(value_i64(&row[6])?)?,
                 comment: nonempty(value_string(&row[7])?),
@@ -411,87 +419,6 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
         tables: tables.into_values().collect(),
         diagnostics: Vec::new(),
     })
-}
-
-fn observed_to_schema(observed: &ObservedSchema) -> Result<db::Schema> {
-    let mut tables = Vec::with_capacity(observed.tables.len());
-    for (table_index, observed_table) in observed.tables.iter().enumerate() {
-        let table_id = TableId(table_index);
-        let mut columns = Vec::with_capacity(observed_table.columns.len());
-        for (column_index, observed_column) in observed_table.columns.iter().enumerate() {
-            let (ty, storage_ty) = postgres_type(observed_column)?;
-            columns.push(Column {
-                id: ColumnId {
-                    table: table_id,
-                    index: column_index,
-                },
-                name: observed_column.name.clone(),
-                ty,
-                storage_ty,
-                nullable: observed_column.nullable,
-                primary_key: false,
-                auto_increment: observed_column
-                    .default
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with("nextval(")),
-                versionable: false,
-            });
-        }
-        let mut indices = Vec::with_capacity(observed_table.indices.len());
-        for (index, observed_index) in observed_table.indices.iter().enumerate() {
-            let columns_for_index = observed_index
-                .columns
-                .iter()
-                .map(|name| {
-                    let column_index = columns
-                        .iter()
-                        .position(|column| &column.name == name)
-                        .with_context(|| {
-                            format!(
-                                "index {} references unknown column {name}",
-                                observed_index.name
-                            )
-                        })?;
-                    columns[column_index].primary_key |= observed_index.primary_key;
-                    Ok(IndexColumn {
-                        column: columns[column_index].id,
-                        op: IndexOp::Eq,
-                        scope: IndexScope::Local,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            indices.push(Index {
-                id: IndexId {
-                    table: table_id,
-                    index,
-                },
-                name: observed_index.name.clone(),
-                on: table_id,
-                columns: columns_for_index,
-                unique: observed_index.unique,
-                primary_key: observed_index.primary_key,
-            });
-        }
-        let primary_index = indices
-            .iter()
-            .find(|index| index.primary_key)
-            .context("observed table has no primary key")?;
-        tables.push(Table {
-            id: table_id,
-            name: observed_table.name.clone(),
-            columns,
-            primary_key: PrimaryKey {
-                columns: primary_index
-                    .columns
-                    .iter()
-                    .map(|column| column.column)
-                    .collect(),
-                index: primary_index.id,
-            },
-            indices,
-        });
-    }
-    Ok(db::Schema { tables })
 }
 
 fn postgres_type(column: &ObservedColumn) -> Result<(stmt::Type, db::Type)> {
@@ -527,6 +454,15 @@ fn postgres_type(column: &ObservedColumn) -> Result<(stmt::Type, db::Type)> {
             column.native_type
         ),
     })
+}
+
+fn postgres_storage_equivalent(inferred: &db::Type, target: &db::Type) -> bool {
+    inferred == target
+        || matches!(
+            (inferred, target),
+            (db::Type::Json, db::Type::Document { binary: false })
+                | (db::Type::Jsonb, db::Type::Document { binary: true })
+        )
 }
 
 fn parse_varchar(native: &str) -> Option<db::Type> {

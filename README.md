@@ -57,6 +57,124 @@ development database only, call `TcMgr::push_base_schema()` once after
 [application integration guide](docs/guide/src/application-integration.md)
 contains the complete provisioning example.
 
+## Schema 迁移使用方法
+
+启用 `migration` 和实际使用的数据库 feature。内置迁移 backend 包括 `postgresql`、`mysql`、
+`sqlite`、`turso`，每个 backend 独立负责 catalog introspection、类型归一化、账本、apply 和
+rollback：
+
+```toml
+[dependencies]
+toasty-mgr = {
+    path = "../toasty-mgr",
+    features = ["migration", "postgresql", "mysql", "sqlite", "turso"]
+}
+```
+
+应用必须先注册全部 Toasty `ModelSet`，再注册迁移 source，最后建立数据库连接。普通源码工作区使用
+`RegisteredFilesystem`，迁移根目录按 `<artifact_root>/<source_code>` 隔离：
+
+```rust,no_run
+use std::path::Path;
+
+use toasty_mgr::migration::{
+    MigrationGroupKey, MigrationSourcesConfig, SchemaScope, TcMigrationMgr,
+};
+use toasty_mgr::{BaseDs, TcMgr};
+
+# async fn register(control_url: &str) -> anyhow::Result<()> {
+TcMgr::set_models("auth", toasty_mgr::models!(BaseDs));
+TcMgr::register_base(control_url).await?;
+
+TcMigrationMgr::register_model_sources(MigrationSourcesConfig {
+    artifact_root: Path::new("toasty").to_path_buf(),
+    migration_group: MigrationGroupKey("primary-database".to_owned()),
+    backend_override: None,
+    namespace: None,
+    scope: SchemaScope::Managed,
+})?;
+# Ok(())
+# }
+```
+
+标准发布流程是先生成、审查和检查 artifact，再执行 tracked migration。调用方直接使用
+`TcMigrationMgr` 的 outcome/report，不需要再声明镜像 DTO：
+
+```rust,no_run
+use toasty_mgr::migration::{
+    MigrationApplyMode, MigrationGenerateRequest, SchemaOrigin, TcMigrationMgr,
+};
+
+# async fn migrate() -> anyhow::Result<()> {
+let generated = TcMigrationMgr::generate(MigrationGenerateRequest {
+    source: "auth".to_owned(),
+    name: "add_login_index".to_owned(),
+    origin: SchemaOrigin::Auto,
+    ..MigrationGenerateRequest::default()
+})
+.await?;
+
+TcMigrationMgr::check(Some("auth")).await?;
+let applied = TcMigrationMgr::apply("auth", MigrationApplyMode::Execute).await?;
+println!("created={}, applied={}", generated.created, applied.applied);
+# Ok(())
+# }
+```
+
+新项目或开发数据库可使用 `sync`，直接比较 live database 和当前模型。它不会绕过迁移文件：
+
+1. artifact 已存在时，先 apply 已跟踪的 pending migration；
+2. introspect 当前 source 拥有的 live table，并归一化为 Toasty schema；
+3. 生成并保存 SQL、rollback、snapshot 和 history；
+4. 通过同一个复合账本和 backend lock 立即 apply；
+5. 空谱系接管已有表时，先校验并记录 observed baseline，再执行 model delta。
+
+```rust,no_run
+use toasty_mgr::migration::TcMigrationMgr;
+
+# async fn sync_schema() -> anyhow::Result<()> {
+let (generated, applied) = TcMigrationMgr::sync("auth", "schema_sync").await?;
+println!(
+    "created={}, applied={}, adopted={}",
+    generated.created, applied.applied, applied.adopted
+);
+
+// 按 base 优先、其余 source code 稳定排序处理全部已注册 source。
+let all = TcMigrationMgr::sync_all("schema_sync").await?;
+println!("sources={}", all.len());
+# Ok(())
+# }
+```
+
+单物理数据源模式不需要数字 ID 分段。每个 logical source 使用自己的 artifact 目录和 source-local ID，
+数据库账本使用 `__toasty_mgr_migrations(source_code, id)` 复合主键；`SchemaScope::Managed` 只观察
+当前 source 的模型表，因此不同 source 可安全共享同一个 database/schema。
+
+状态与回滚示例：
+
+```rust,no_run
+use toasty_mgr::migration::{MigrationRollbackSelection, TcMigrationMgr};
+
+# async fn inspect_and_rollback() -> anyhow::Result<()> {
+let status = TcMigrationMgr::status("auth", true).await?;
+println!("pending={:?}, drift={}", status.pending, status.model_drift);
+
+let report = TcMigrationMgr::rollback("auth", MigrationRollbackSelection::Steps(1)).await?;
+println!("rolled_back={}", report.rolled_back);
+# Ok(())
+# }
+```
+
+关键限制：
+
+- migration SQL 的多条 statement 使用 `-- #[toasty::breakpoint]` 分隔；
+- 禁止在 managed schema 中使用数据库外键、`REFERENCES` 或 cascade；
+- PostgreSQL、SQLite、Turso 的 DDL 与账本记录使用事务边界；
+- MySQL DDL 会 implicit commit，adapter 使用 database 级 `GET_LOCK` 和
+  `__toasty_mgr_migration_runs`；发现异常遗留 marker 时返回 `migration_recovery_ambiguous`，不会猜测重试；
+- `sync` 面向 filesystem authoring artifact；发布二进制应注册 `MigrationArtifactInput::Embedded`，
+  并只执行 `apply`/`status`/`rollback`。
+
 ## Project documentation
 
 - [Application integration](docs/guide/src/application-integration.md): startup

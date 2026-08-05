@@ -1,7 +1,14 @@
 use std::{future::Future, pin::Pin};
 
-use anyhow::Result;
-use toasty::{Db, schema::db};
+use anyhow::{Context, Result};
+use toasty::{
+    Db,
+    schema::db::{
+        self, Column, ColumnId, Index, IndexColumn, IndexId, IndexOp, IndexScope, PrimaryKey,
+        Table, TableId,
+    },
+    stmt,
+};
 
 use super::SchemaScope;
 
@@ -18,12 +25,19 @@ pub use turso::TursoMigrationBackend;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BackendId(pub String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DdlAtomicity {
+    Transactional,
+    ImplicitCommit,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedColumn {
     pub name: String,
     pub data_type: String,
     pub native_type: String,
     pub nullable: bool,
+    pub auto_increment: bool,
     pub default: Option<String>,
     pub ordinal: usize,
     pub comment: Option<String>,
@@ -95,8 +109,9 @@ pub struct BackendMigration {
 pub trait MigrationBackend: Send + Sync + 'static {
     fn backend_id(&self) -> &BackendId;
     fn aliases(&self) -> &[&str];
+    fn ddl_atomicity(&self) -> DdlAtomicity;
     fn inspect<'a>(&'a self, request: SchemaInspectRequest<'a>) -> InspectFuture<'a>;
-    fn normalize(&self, observed: &ObservedSchema) -> Result<db::Schema>;
+    fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema>;
     fn inspect_applied_ids<'a>(
         &'a self,
         source_code: &'a str,
@@ -124,4 +139,135 @@ pub trait MigrationBackend: Send + Sync + 'static {
         migration: BackendMigration,
         db: &'a mut Db,
     ) -> RollbackFuture<'a>;
+}
+
+pub(super) fn normalize_observed<F>(
+    observed: &ObservedSchema,
+    target: &db::Schema,
+    mut column_type: F,
+) -> Result<db::Schema>
+where
+    F: FnMut(&ObservedColumn, Option<&Column>) -> Result<(stmt::Type, db::Type)>,
+{
+    if let Some(diagnostic) = observed.diagnostics.first() {
+        anyhow::bail!("migration_schema_unsupported: {diagnostic}");
+    }
+    let mut tables = Vec::with_capacity(observed.tables.len());
+    for (table_index, observed_table) in observed.tables.iter().enumerate() {
+        let table_id = TableId(table_index);
+        let target_table = target
+            .tables
+            .iter()
+            .find(|table| table.name == observed_table.name);
+        let mut columns = Vec::with_capacity(observed_table.columns.len());
+        for (column_index, observed_column) in observed_table.columns.iter().enumerate() {
+            let target_column = target_table.and_then(|table| {
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == observed_column.name)
+            });
+            let (ty, storage_ty) = column_type(observed_column, target_column)?;
+            columns.push(Column {
+                id: ColumnId {
+                    table: table_id,
+                    index: column_index,
+                },
+                name: observed_column.name.clone(),
+                ty,
+                storage_ty,
+                nullable: observed_column.nullable,
+                primary_key: false,
+                auto_increment: observed_column.auto_increment,
+                versionable: false,
+            });
+        }
+        let mut indices = Vec::with_capacity(observed_table.indices.len());
+        for (index, observed_index) in observed_table.indices.iter().enumerate() {
+            let target_index = target_table.and_then(|table| {
+                table
+                    .indices
+                    .iter()
+                    .find(|candidate| index_shape_matches(table, candidate, observed_index))
+            });
+            let columns_for_index = observed_index
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(position, name)| {
+                    let column_index = columns
+                        .iter()
+                        .position(|column| &column.name == name)
+                        .with_context(|| {
+                            format!(
+                                "index {} references unknown column {name}",
+                                observed_index.name
+                            )
+                        })?;
+                    if observed_index.primary_key {
+                        columns[column_index].primary_key = target_table
+                            .and_then(|table| {
+                                table.columns.iter().find(|column| column.name == *name)
+                            })
+                            .map(|column| column.primary_key)
+                            .unwrap_or(true);
+                    }
+                    let (op, scope) = target_index
+                        .and_then(|index| index.columns.get(position))
+                        .map(|column| (column.op, column.scope))
+                        .unwrap_or((IndexOp::Eq, IndexScope::Local));
+                    Ok(IndexColumn {
+                        column: columns[column_index].id,
+                        op,
+                        scope,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            indices.push(Index {
+                id: IndexId {
+                    table: table_id,
+                    index,
+                },
+                name: target_index
+                    .map(|index| index.name.clone())
+                    .unwrap_or_else(|| observed_index.name.clone()),
+                on: table_id,
+                columns: columns_for_index,
+                unique: observed_index.unique,
+                primary_key: observed_index.primary_key,
+            });
+        }
+        let primary_index = indices
+            .iter()
+            .find(|index| index.primary_key)
+            .with_context(|| {
+                format!("observed table has no primary key: {}", observed_table.name)
+            })?;
+        tables.push(Table {
+            id: table_id,
+            name: observed_table.name.clone(),
+            columns,
+            primary_key: PrimaryKey {
+                columns: primary_index
+                    .columns
+                    .iter()
+                    .map(|column| column.column)
+                    .collect(),
+                index: primary_index.id,
+            },
+            indices,
+        });
+    }
+    Ok(db::Schema { tables })
+}
+
+fn index_shape_matches(table: &Table, index: &Index, observed: &ObservedIndex) -> bool {
+    index.primary_key == observed.primary_key
+        && index.unique == observed.unique
+        && index.columns.len() == observed.columns.len()
+        && index
+            .columns
+            .iter()
+            .zip(&observed.columns)
+            .all(|(column, name)| table.column(column.column).name == *name)
 }

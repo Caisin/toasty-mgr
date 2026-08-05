@@ -67,6 +67,11 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 /// Process-wide migration manager for explicitly registered sources.
 pub struct TcMigrationMgr;
 
+struct GeneratedMigration {
+    outcome: MigrationGenerateOutcome,
+    adopt_baseline: bool,
+}
+
 impl TcMigrationMgr {
     pub fn register_model_sources(config: MigrationSourcesConfig) -> Result<Vec<String>> {
         let codes = TcModelSets::entries_with_base()
@@ -142,6 +147,48 @@ impl TcMigrationMgr {
         Ok(outcomes)
     }
 
+    pub async fn sync(
+        source: &str,
+        name: &str,
+    ) -> Result<(MigrationGenerateOutcome, MigrationApplyReport)> {
+        let state = Self::artifact_state(source)?;
+        let applied = if state == ArtifactState::Ready {
+            Self::apply(source, MigrationApplyMode::Execute).await?
+        } else {
+            MigrationApplyReport::default()
+        };
+        let generated = Self::generate_internal(MigrationGenerateRequest {
+            source: source.to_owned(),
+            name: name.to_owned(),
+            origin: SchemaOrigin::LiveDatabase,
+            ..MigrationGenerateRequest::default()
+        })
+        .await?;
+        if state == ArtifactState::Ready && !generated.outcome.created {
+            return Ok((generated.outcome, applied));
+        }
+        let mode = if generated.adopt_baseline {
+            MigrationApplyMode::AdoptBaseline
+        } else {
+            MigrationApplyMode::Execute
+        };
+        let mut final_apply = Self::apply(source, mode).await?;
+        final_apply.applied += applied.applied;
+        final_apply.adopted += applied.adopted;
+        Ok((generated.outcome, final_apply))
+    }
+
+    pub async fn sync_all(
+        name: impl Into<String>,
+    ) -> Result<Vec<(MigrationGenerateOutcome, MigrationApplyReport)>> {
+        let name = name.into();
+        let mut outcomes = Vec::with_capacity(Self::source_codes().len());
+        for source in Self::source_codes() {
+            outcomes.push(Self::sync(&source, &name).await?);
+        }
+        Ok(outcomes)
+    }
+
     pub async fn apply_all() -> Result<MigrationApplyReport> {
         let codes = Self::source_codes();
         for source in &codes {
@@ -173,6 +220,10 @@ impl TcMigrationMgr {
     }
 
     pub async fn generate(request: MigrationGenerateRequest) -> Result<MigrationGenerateOutcome> {
+        Ok(Self::generate_internal(request).await?.outcome)
+    }
+
+    async fn generate_internal(request: MigrationGenerateRequest) -> Result<GeneratedMigration> {
         let config = source_config(&request.source)?;
         let state = inspect_state(&config.artifact_root);
         if matches!(state, ArtifactState::Partial | ArtifactState::Invalid) {
@@ -217,18 +268,16 @@ impl TcMigrationMgr {
                         db: &mut db,
                     })
                     .await?;
-                let observed_schema = backend.normalize(&observed)?;
+                let observed_schema = backend.normalize(&observed, &current_schema)?;
                 if state == ArtifactState::Ready {
                     let latest = latest_schema(&history, &snapshots_dir)?;
-                    if toasty::migration::generate(
+                    if let Some(drift) = toasty::migration::generate(
                         db.driver(),
                         &latest,
                         &observed_schema,
                         &diff::RenameHints::new(),
-                    )
-                    .is_some()
-                    {
-                        bail!("tracked_schema_drift");
+                    ) {
+                        bail!("tracked_schema_drift: {drift:?}");
                     }
                 } else if !observed_schema.tables.is_empty() {
                     let baseline = toasty::migration::generate(
@@ -267,24 +316,30 @@ impl TcMigrationMgr {
             toasty::migration::generate(db.driver(), &previous_schema, &current_schema, &hints)
         else {
             if let Some((id, migration_path, rollback_path, snapshot_path)) = baseline_written {
-                return Ok(MigrationGenerateOutcome {
-                    source: config.code,
-                    created: true,
-                    id: Some(id),
-                    migration_path: Some(migration_path),
-                    rollback_path: Some(rollback_path),
-                    snapshot_path: Some(snapshot_path),
-                    artifact_state: ArtifactState::Ready,
+                return Ok(GeneratedMigration {
+                    outcome: MigrationGenerateOutcome {
+                        source: config.code,
+                        created: true,
+                        id: Some(id),
+                        migration_path: Some(migration_path),
+                        rollback_path: Some(rollback_path),
+                        snapshot_path: Some(snapshot_path),
+                        artifact_state: ArtifactState::Ready,
+                    },
+                    adopt_baseline: true,
                 });
             }
-            return Ok(MigrationGenerateOutcome {
-                source: config.code,
-                created: false,
-                id: None,
-                migration_path: None,
-                rollback_path: None,
-                snapshot_path: None,
-                artifact_state: state,
+            return Ok(GeneratedMigration {
+                outcome: MigrationGenerateOutcome {
+                    source: config.code,
+                    created: false,
+                    id: None,
+                    migration_path: None,
+                    rollback_path: None,
+                    snapshot_path: None,
+                    artifact_state: state,
+                },
+                adopt_baseline: false,
             });
         };
         let rollback = toasty::migration::generate(
@@ -296,14 +351,17 @@ impl TcMigrationMgr {
         .context("model schema produced no rollback migration")?;
         let (id, migration_path, rollback_path, snapshot_path) =
             write_generated(&config, &mut history, &request.name, generated, rollback)?;
-        Ok(MigrationGenerateOutcome {
-            source: config.code,
-            created: true,
-            id: Some(id),
-            migration_path: Some(migration_path),
-            rollback_path: Some(rollback_path),
-            snapshot_path: Some(snapshot_path),
-            artifact_state: ArtifactState::Ready,
+        Ok(GeneratedMigration {
+            outcome: MigrationGenerateOutcome {
+                source: config.code,
+                created: true,
+                id: Some(id),
+                migration_path: Some(migration_path),
+                rollback_path: Some(rollback_path),
+                snapshot_path: Some(snapshot_path),
+                artifact_state: ArtifactState::Ready,
+            },
+            adopt_baseline: baseline_written.is_some(),
         })
     }
 
@@ -329,7 +387,7 @@ impl TcMigrationMgr {
                 db: &mut db,
             })
             .await?;
-        let observed_schema = backend.normalize(&observed)?;
+        let observed_schema = backend.normalize(&observed, &db.schema().db)?;
         if observed_schema.tables.is_empty() {
             bail!("migration baseline requires an existing observed schema");
         }
@@ -393,7 +451,7 @@ impl TcMigrationMgr {
                     db: &mut db,
                 })
                 .await?;
-            let observed_schema = backend.normalize(&observed)?;
+            let observed_schema = backend.normalize(&observed, &db.schema().db)?;
             if toasty::migration::generate(
                 db.driver(),
                 baseline_schema,

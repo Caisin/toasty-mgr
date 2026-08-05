@@ -115,6 +115,10 @@ impl TcMigrationMgr {
 
     pub async fn generate(request: MigrationGenerateRequest) -> Result<MigrationGenerateOutcome>;
     pub async fn generate_all(name: impl Into<String>) -> Result<Vec<MigrationGenerateOutcome>>;
+    pub async fn sync(source: &str, name: &str)
+        -> Result<(MigrationGenerateOutcome, MigrationApplyReport)>;
+    pub async fn sync_all(name: impl Into<String>)
+        -> Result<Vec<(MigrationGenerateOutcome, MigrationApplyReport)>>;
     pub async fn baseline(source: &str, name: &str) -> Result<MigrationGenerateOutcome>;
     pub async fn apply(source: &str, mode: MigrationApplyMode) -> Result<MigrationApplyReport>;
     pub async fn apply_all() -> Result<MigrationApplyReport>;
@@ -131,7 +135,10 @@ impl TcMigrationMgr {
 保证隐式 `base` 排在第一位，并按 `<artifact_root>/<source_code>` 建立 source 配置。单独
 `register_source()` 只保留给需要覆盖 namespace/scope/backend 的特殊 source。应用直接复用本模块
 的 outcome/report，不再声明一组镜像 DTO，也不增加只调用 manager 一次的 facade。
-`apply_all()`、`status_all()` 与 `generate_all()` 负责真正包含循环、预检和汇总的多 source 编排。
+`apply_all()`、`status_all()`、`generate_all()` 与 `sync_all()` 负责真正包含循环、预检和汇总的多
+source 编排。`sync` 固定使用 `SchemaOrigin::LiveDatabase`，先写 tracked artifact，再通过同一个
+apply engine 执行；空谱系观察到既存表时自动选择经 live schema 校验的 `AdoptBaseline`。
+single-database 配置仍逐 logical source 执行，依靠 `SchemaScope` 和复合账本隔离。
 
 artifact 来源在 source 注册阶段显式绑定：
 
@@ -259,9 +266,10 @@ src/migration/
 - `backend/mod.rs`：只定义 trait、backend-neutral observed types 和 re-export。
 - `backend/<database>.rs`：每种数据库独立保存 catalog SQL、类型归一化及 ledger/apply/rollback；禁止把多个数据库实现合并进同一文件。
 
-当前交付以 PostgreSQL 为完整实现。MySQL、SQLite、Turso 已具有独立 adapter 文件和明确的
-fail-closed 错误，待各自 catalog/type/lock 集成测试完成后再注册为可用 backend，不能因 URL 或
-SQL 方言相似而静默复用其他实现。
+当前交付完整实现 PostgreSQL、MySQL、SQLite 与 Turso。每个 backend 仍在独立文件实现 trait、声明
+backend ID/alias，并拥有对应账本与锁语义。SQLite 与 Turso 只复用经过两种 driver 集成测试的
+SQLite-family catalog/归一化/事务执行 helper；不能因 URL 或 SQL 方言相似而把 Turso 静默注册成
+SQLite backend。
 
 Toasty 继续拥有 schema diff 和 driver DDL generation；`toasty-mgr` 不复制
 `schema::diff` 或 PostgreSQL/MySQL/SQLite migration serializer。
@@ -308,16 +316,9 @@ pub trait MigrationBackend: Send + Sync + 'static {
         context: SchemaInspectContext<'a>,
     ) -> InspectFuture<'a>;
 
-    fn normalize(
-        &self,
-        observed: ObservedSchema,
-        context: SchemaNormalizeContext<'_>,
-    ) -> Result<NormalizedSchema>;
+    fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema>;
 
-    fn acquire_lock<'a>(
-        &'a self,
-        context: MigrationLockContext<'a>,
-    ) -> LockFuture<'a>;
+    // ledger/apply/rollback 方法由 adapter 在同一锁/事务边界内实现。
 }
 
 pub struct SchemaInspectContext<'a> {
@@ -340,7 +341,8 @@ pub enum DdlAtomicity {
 }
 ```
 
-manager 为一次 inspection 获取专用 connection，并尽可能使用 read-only、repeatable-read transaction。backend 不支持该隔离级别时返回 warning diagnostic，而不是假装取得一致快照。
+`normalize` 接收当前模型 schema 作为逻辑类型提示：catalog 仍决定 storage type、nullability、identity
+与索引事实；仅当物理表示等价时复用 target 的 `stmt::Type` 或 `Document/List/Enum` 语义。
 
 manager 先根据 `SchemaScope`、target、latest snapshot 和 rename hints 解析出不可变的
 `ResolvedSchemaScope`，避免 adapter 自己猜测哪些表属于当前 source。每个 backend adapter 同时拥有
@@ -352,9 +354,11 @@ apply 按 physical `migration_group` 获取锁，锁必须覆盖“读取 applie
 group migration -> 写最终记录”的完整临界区：
 
 - PostgreSQL：transaction-level/session-level advisory lock；
-- MySQL：`GET_LOCK`/`RELEASE_LOCK`，并明确 DDL 为 `ImplicitCommit`；
+- MySQL：按当前 database 获取迁移专用 `GET_LOCK`/`RELEASE_LOCK`，同库 logical source 串行且不得
+  使用 `RELEASE_ALL_LOCKS()` 影响业务 advisory lock；明确 DDL 为 `ImplicitCommit`，执行前写
+  `__toasty_mgr_migration_runs`，异常残留时返回 `migration_recovery_ambiguous`，不得重复猜测执行；
 - SQLite：`BEGIN IMMEDIATE` 或 `BEGIN EXCLUSIVE`；
-- Turso：使用经过集成测试确认的写事务/远端锁语义。
+- Turso：使用经过集成测试确认的 `BEGIN IMMEDIATE` 写事务语义。
 
 `MigrationLockGuard` 持有专用 connection，并暴露实际执行使用的 executor。SQLite/Turso 若用写事务
 实现锁，该 guard 同时拥有事务，公共 apply engine 不得在其中再次 `BEGIN`；PostgreSQL/MySQL 的
@@ -421,6 +425,10 @@ pub struct ObservedIndex {
 }
 ```
 
+当前代码中的轻量观测结构使用 `auto_increment` 表示上述 `identity`，`diagnostics` 保存稳定错误码与
+对象路径；遇到 generated column、foreign key、CHECK、partial/expression index、SQLite STRICT/
+WITHOUT ROWID 等当前不能无损表达的结构时，`normalize` fail closed，不生成可能丢结构的迁移。
+
 `ObservedConstraint` 至少记录 foreign key、check、exclude 和 backend-specific constraint。它们即使不进入 Toasty `db::Schema`，也必须进入 diagnostics 和 fingerprint。
 
 ## 归一化为 Toasty schema
@@ -481,6 +489,9 @@ pub struct NormalizedSchema {
 - `AUTO_INCREMENT` 转换为 identity；
 - inline ENUM 解析为 unnamed `TypeEnum`；
 - prefix/expression index、generated column、collation 和 foreign key 进入 diagnostics。
+- migration apply 使用当前 database 对应的 connection-scoped `GET_LOCK`；连接池 checkout 只尝试
+  清理同名迁移锁，不释放业务锁。由于 DDL implicit commit，run marker 在 DDL 前持久化，成功写复合
+  账本后删除。发现遗留 run marker 时停止并要求人工核对 live schema。
 
 ### SQLite
 
@@ -491,12 +502,16 @@ pub struct NormalizedSchema {
 - 读取 index columns 和 uniqueness；
 - `WITHOUT ROWID`、STRICT table、expression/partial index、generated column、CHECK 和 foreign key 进入 diagnostics；
 - 只有 driver migration capability 明确支持时才生成 table rebuild。
+- apply/record/rollback 使用 `BEGIN IMMEDIATE`，DDL 与复合账本在同一事务提交。
 
 ### Turso
 
 提供独立 `TursoMigrationBackend`，内部可复用 SQLite catalog reader，但必须通过 Turso integration
 tests 证明 PRAGMA、transaction、migration lock 和返回类型兼容。不能仅因 URL 类似 SQLite 就静默
 选择 SQLite backend。
+
+Turso adapter 与 SQLite adapter 的 ID、alias、trait impl 保持独立；共享 helper 不包含 backend
+注册或 facade API，避免复制两份完全相同的 PRAGMA decoder 和账本事务代码。
 
 ## Plan、生成与执行
 

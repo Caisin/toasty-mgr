@@ -1,14 +1,18 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use toasty::{Db, schema::db};
 
 use super::{
-    AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, InspectFuture, LedgerMigration,
-    MigrationBackend, ObservedSchema, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest,
+    AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
+    LedgerMigration, MigrationBackend, ObservedSchema, PrepareLedgerFuture, RollbackFuture,
+    SchemaInspectRequest, sqlite,
 };
 
+/// Turso uses SQLite catalog and DDL semantics, but remains a separately registered backend so
+/// driver-specific transaction behavior is covered independently and can diverge later.
 pub struct TursoMigrationBackend {
     id: BackendId,
 }
+
 impl Default for TursoMigrationBackend {
     fn default() -> Self {
         Self {
@@ -16,42 +20,67 @@ impl Default for TursoMigrationBackend {
         }
     }
 }
+
 impl MigrationBackend for TursoMigrationBackend {
     fn backend_id(&self) -> &BackendId {
         &self.id
     }
+
     fn aliases(&self) -> &[&str] {
         &["turso"]
     }
-    fn inspect<'a>(&'a self, _request: SchemaInspectRequest<'a>) -> InspectFuture<'a> {
-        Box::pin(async { bail!("migration_backend_introspection_unsupported: turso") })
+
+    fn ddl_atomicity(&self) -> DdlAtomicity {
+        DdlAtomicity::Transactional
     }
-    fn normalize(&self, _observed: &ObservedSchema) -> Result<db::Schema> {
-        bail!("migration_backend_normalization_unsupported: turso")
+
+    fn inspect<'a>(&'a self, request: SchemaInspectRequest<'a>) -> InspectFuture<'a> {
+        Box::pin(async move { sqlite::inspect(request).await })
     }
+
+    fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema> {
+        sqlite::normalize(observed, target)
+    }
+
     fn inspect_applied_ids<'a>(
         &'a self,
-        _source_code: &'a str,
-        _tracked: &'a [LedgerMigration],
-        _db: &'a mut Db,
+        source_code: &'a str,
+        tracked: &'a [LedgerMigration],
+        db: &'a mut Db,
     ) -> AppliedIdsFuture<'a> {
-        Box::pin(async { bail!("migration_ledger_inspection_unsupported: turso") })
+        Box::pin(async move { sqlite::inspect_applied_ids(source_code, tracked, db).await })
     }
+
     fn prepare_ledger<'a>(
         &'a self,
-        _: &'a str,
-        _: &'a [LedgerMigration],
-        _: &'a mut Db,
+        source_code: &'a str,
+        tracked: &'a [LedgerMigration],
+        db: &'a mut Db,
     ) -> PrepareLedgerFuture<'a> {
-        Box::pin(async { bail!("migration_ledger_prepare_unsupported: turso") })
+        Box::pin(async move { sqlite::prepare_ledger(source_code, tracked, db).await })
     }
-    fn apply_migration<'a>(&'a self, _: BackendMigration, _: &'a mut Db) -> ApplyFuture<'a> {
-        Box::pin(async { bail!("migration_apply_unsupported: turso") })
+
+    fn apply_migration<'a>(
+        &'a self,
+        migration: BackendMigration,
+        db: &'a mut Db,
+    ) -> ApplyFuture<'a> {
+        Box::pin(async move { sqlite::apply_migration(migration, true, db).await })
     }
-    fn record_migration<'a>(&'a self, _: BackendMigration, _: &'a mut Db) -> ApplyFuture<'a> {
-        Box::pin(async { bail!("migration_apply_unsupported: turso") })
+
+    fn record_migration<'a>(
+        &'a self,
+        migration: BackendMigration,
+        db: &'a mut Db,
+    ) -> ApplyFuture<'a> {
+        Box::pin(async move { sqlite::apply_migration(migration, false, db).await })
     }
-    fn rollback_migration<'a>(&'a self, _: BackendMigration, _: &'a mut Db) -> RollbackFuture<'a> {
-        Box::pin(async { bail!("migration_rollback_unsupported: turso") })
+
+    fn rollback_migration<'a>(
+        &'a self,
+        migration: BackendMigration,
+        db: &'a mut Db,
+    ) -> RollbackFuture<'a> {
+        Box::pin(async move { sqlite::rollback_migration(migration, db).await })
     }
 }
