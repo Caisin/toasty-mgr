@@ -17,5 +17,5 @@ pub use types::{
     MigrationApplyMode, MigrationApplyReport, MigrationArtifactInput, MigrationCheckReport,
     MigrationGenerateOutcome, MigrationGenerateRequest, MigrationGroupKey, MigrationRollbackReport,
     MigrationRollbackSelection, MigrationSourceConfig, MigrationSourcesConfig,
-    MigrationStatusReport, SchemaOrigin, SchemaScope,
+    MigrationStatusReport, MigrationSyncReport, SchemaOrigin, SchemaScope,
 };

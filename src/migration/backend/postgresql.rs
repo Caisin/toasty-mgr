@@ -10,7 +10,8 @@ use toasty::{
 use super::{
     AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
     LedgerMigration, MigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema,
-    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, normalize_observed,
+    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, SchemaSyncFuture,
+    normalize_observed,
 };
 use crate::migration::SchemaScope;
 
@@ -51,6 +52,15 @@ impl MigrationBackend for PostgreSqlMigrationBackend {
                 .map(|target| (target.ty.clone(), target.storage_ty.clone()))
                 .unwrap_or(inferred))
         })
+    }
+
+    fn sync_schema<'a>(
+        &'a self,
+        source_code: &'a str,
+        sql: String,
+        db: &'a mut Db,
+    ) -> SchemaSyncFuture<'a> {
+        Box::pin(async move { sync_schema(source_code, &sql, db).await })
     }
 
     fn inspect_applied_ids<'a>(
@@ -188,6 +198,14 @@ async fn apply_migration(
     Ok(true)
 }
 
+async fn sync_schema(source_code: &str, sql: &str, db: &mut Db) -> Result<()> {
+    let mut tx = db.transaction().await?;
+    lock_source(source_code, &mut tx).await?;
+    execute_sql_statements(sql, &mut tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn rollback_migration(migration: BackendMigration, db: &mut Db) -> Result<()> {
     let mut tx = db.transaction().await?;
     create_ledger(&mut tx).await?;
@@ -304,12 +322,195 @@ fn validate_tracked_name(
 
 async fn execute_sql_statements(sql: &str, executor: &mut dyn Executor) -> Result<()> {
     let migration = db::Migration::new_sql(sql.to_owned());
-    for statement in migration.statements() {
-        toasty::sql::statement(statement.to_owned())
-            .exec(executor)
-            .await?;
+    for breakpoint_statement in migration.statements() {
+        for statement in split_postgresql_statements(breakpoint_statement)? {
+            toasty::sql::statement(statement).exec(executor).await?;
+        }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+enum PostgreSqlLexState {
+    Normal,
+    SingleQuoted { backslash_escapes: bool },
+    DoubleQuoted,
+    DollarQuoted(Vec<u8>),
+    LineComment,
+    BlockComment(usize),
+}
+
+fn split_postgresql_statements(sql: &str) -> Result<Vec<String>> {
+    let bytes = sql.as_bytes();
+    let mut statements = Vec::new();
+    let mut state = PostgreSqlLexState::Normal;
+    let mut start = 0;
+    let mut index = 0;
+    let mut has_code = false;
+
+    while index < bytes.len() {
+        match &mut state {
+            PostgreSqlLexState::Normal => match bytes[index] {
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = PostgreSqlLexState::LineComment;
+                    index += 2;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = PostgreSqlLexState::BlockComment(1);
+                    index += 2;
+                }
+                b'\'' => {
+                    has_code = true;
+                    state = PostgreSqlLexState::SingleQuoted {
+                        backslash_escapes: quote_uses_backslash_escapes(bytes, index),
+                    };
+                    index += 1;
+                }
+                b'"' => {
+                    has_code = true;
+                    state = PostgreSqlLexState::DoubleQuoted;
+                    index += 1;
+                }
+                b'$' => {
+                    if let Some(delimiter) = dollar_quote_delimiter(bytes, index) {
+                        has_code = true;
+                        index += delimiter.len();
+                        state = PostgreSqlLexState::DollarQuoted(delimiter.to_vec());
+                    } else {
+                        has_code = true;
+                        index += 1;
+                    }
+                }
+                b';' => {
+                    if has_code {
+                        statements.push(sql[start..index].trim().to_owned());
+                    }
+                    start = index + 1;
+                    has_code = false;
+                    index += 1;
+                }
+                byte => {
+                    has_code |= !byte.is_ascii_whitespace();
+                    index += 1;
+                }
+            },
+            PostgreSqlLexState::SingleQuoted { backslash_escapes } => {
+                if *backslash_escapes && bytes[index] == b'\\' {
+                    index += usize::from(index + 1 < bytes.len()) + 1;
+                } else if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        state = PostgreSqlLexState::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            PostgreSqlLexState::DoubleQuoted => {
+                if bytes[index] == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
+                        index += 2;
+                    } else {
+                        state = PostgreSqlLexState::Normal;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            PostgreSqlLexState::DollarQuoted(delimiter) => {
+                if bytes[index..].starts_with(delimiter) {
+                    index += delimiter.len();
+                    state = PostgreSqlLexState::Normal;
+                } else {
+                    index += 1;
+                }
+            }
+            PostgreSqlLexState::LineComment => {
+                if matches!(bytes[index], b'\n' | b'\r') {
+                    state = PostgreSqlLexState::Normal;
+                }
+                index += 1;
+            }
+            PostgreSqlLexState::BlockComment(depth) => {
+                if bytes[index..].starts_with(b"/*") {
+                    *depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    *depth -= 1;
+                    index += 2;
+                    if *depth == 0 {
+                        state = PostgreSqlLexState::Normal;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    match state {
+        PostgreSqlLexState::Normal | PostgreSqlLexState::LineComment => {}
+        PostgreSqlLexState::SingleQuoted { .. } => {
+            bail!("unterminated PostgreSQL single-quoted string in migration SQL")
+        }
+        PostgreSqlLexState::DoubleQuoted => {
+            bail!("unterminated PostgreSQL quoted identifier in migration SQL")
+        }
+        PostgreSqlLexState::DollarQuoted(delimiter) => bail!(
+            "unterminated PostgreSQL dollar-quoted string {} in migration SQL",
+            String::from_utf8_lossy(&delimiter)
+        ),
+        PostgreSqlLexState::BlockComment(_) => {
+            bail!("unterminated PostgreSQL block comment in migration SQL")
+        }
+    }
+
+    if has_code {
+        statements.push(sql[start..].trim().to_owned());
+    }
+    Ok(statements)
+}
+
+fn quote_uses_backslash_escapes(bytes: &[u8], quote: usize) -> bool {
+    let escaped = quote > 0
+        && matches!(bytes[quote - 1], b'e' | b'E')
+        && (quote == 1 || !is_identifier_continue(bytes[quote - 2]));
+    let unicode = quote > 1
+        && bytes[quote - 2..quote].eq_ignore_ascii_case(b"u&")
+        && (quote == 2 || !is_identifier_continue(bytes[quote - 3]));
+    escaped || unicode
+}
+
+fn dollar_quote_delimiter(bytes: &[u8], start: usize) -> Option<&[u8]> {
+    let next = *bytes.get(start + 1)?;
+    if next == b'$' {
+        return Some(&bytes[start..=start + 1]);
+    }
+    if !is_identifier_start(next) {
+        return None;
+    }
+    let mut index = start + 2;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'$' {
+            return Some(&bytes[start..=index]);
+        }
+        if !is_identifier_continue(byte) {
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || !byte.is_ascii()
+}
+
+fn is_identifier_continue(byte: u8) -> bool {
+    is_identifier_start(byte) || byte.is_ascii_digit() || byte == b'$'
 }
 
 fn to_i64(id: u64) -> Result<i64> {
@@ -333,7 +534,8 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
     let column_rows = toasty::sql::query(
         "SELECT c.table_name::text, c.column_name::text, c.data_type::text, \
          pg_catalog.format_type(a.atttypid, a.atttypmod)::text, c.is_nullable::text, COALESCE(c.column_default, '')::text, \
-         c.ordinal_position::bigint, COALESCE(pg_catalog.col_description(cl.oid, a.attnum), '')::text \
+         c.is_identity::text, c.ordinal_position::bigint, \
+         COALESCE(pg_catalog.col_description(cl.oid, a.attnum), '')::text \
          FROM information_schema.columns c \
          JOIN pg_catalog.pg_class cl ON cl.relname = c.table_name \
          JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace AND n.nspname = c.table_schema \
@@ -346,7 +548,8 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
     .await?;
     let index_rows = toasty::sql::query(
         "SELECT tbl.relname::text, idx.relname::text, ix.indisunique::text, \
-         ix.indisprimary::text, string_agg(att.attname::text, ',' ORDER BY ord.n)::text \
+         ix.indisprimary::text, string_agg(att.attname::text, ',' ORDER BY ord.n)::text, \
+         COALESCE(pg_catalog.pg_get_expr(ix.indpred, ix.indrelid), '')::text \
          FROM pg_catalog.pg_index ix \
          JOIN pg_catalog.pg_class tbl ON tbl.oid = ix.indrelid \
          JOIN pg_catalog.pg_namespace ns ON ns.oid = tbl.relnamespace \
@@ -354,7 +557,7 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
          JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY ord(attnum, n) ON true \
          JOIN pg_catalog.pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = ord.attnum \
          WHERE ns.nspname = $1 AND tbl.relkind = 'r' \
-         GROUP BY tbl.relname, idx.relname, ix.indisunique, ix.indisprimary \
+         GROUP BY tbl.relname, idx.relname, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid \
          ORDER BY tbl.relname, idx.relname",
     )
     .bind(namespace.clone())
@@ -390,10 +593,10 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
                 data_type: value_string(&row[2])?,
                 native_type: value_string(&row[3])?,
                 nullable: value_string(&row[4])? == "YES",
-                auto_increment: default.starts_with("nextval("),
+                auto_increment: postgres_auto_increment(&default, &value_string(&row[6])?),
                 default: (!default.is_empty()).then_some(default),
-                ordinal: usize::try_from(value_i64(&row[6])?)?,
-                comment: nonempty(value_string(&row[7])?),
+                ordinal: usize::try_from(value_i64(&row[7])?)?,
+                comment: nonempty(value_string(&row[8])?),
             });
     }
     for row in index_rows {
@@ -412,6 +615,7 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
                 .split(',')
                 .map(str::to_owned)
                 .collect(),
+            predicate: nonempty(value_string(&row[5])?),
         });
     }
     Ok(ObservedSchema {
@@ -463,6 +667,14 @@ fn postgres_storage_equivalent(inferred: &db::Type, target: &db::Type) -> bool {
             (db::Type::Json, db::Type::Document { binary: false })
                 | (db::Type::Jsonb, db::Type::Document { binary: true })
         )
+        || matches!(
+            (inferred, target),
+            (db::Type::Integer(left), db::Type::UnsignedInteger(right)) if left == right
+        )
+}
+
+fn postgres_auto_increment(default: &str, is_identity: &str) -> bool {
+    is_identity == "YES" || default.starts_with("nextval(")
 }
 
 fn parse_varchar(native: &str) -> Option<db::Type> {
@@ -521,13 +733,5 @@ fn nonempty(value: String) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{CREATE_LEDGER_SQL, LEDGER};
-
-    #[test]
-    fn manager_ledger_is_distinct_from_toasty_and_source_scoped() {
-        assert_eq!(LEDGER, "__toasty_mgr_migrations");
-        assert!(CREATE_LEDGER_SQL.contains("PRIMARY KEY (source_code, id)"));
-        assert!(!CREATE_LEDGER_SQL.contains("REFERENCES"));
-    }
-}
+#[path = "postgresql_tests.rs"]
+mod tests;

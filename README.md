@@ -121,26 +121,24 @@ println!("created={}, applied={}", generated.created, applied.applied);
 # }
 ```
 
-新项目或开发数据库可使用 `sync`，直接比较 live database 和当前模型。它不会绕过迁移文件：
-
-1. artifact 已存在时，先 apply 已跟踪的 pending migration；
-2. introspect 当前 source 拥有的 live table，并归一化为 Toasty schema；
-3. 生成并保存 SQL、rollback、snapshot 和 history；
-4. 通过同一个复合账本和 backend lock 立即 apply；
-5. 空谱系接管已有表时，先校验并记录 observed baseline，再执行 model delta。
+新项目或开发数据库可使用 `sync`，直接把 live database 收敛到当前模型。`sync` 不读取 latest
+snapshot，不写 SQL/snapshot/history artifact，也不写迁移账本；它在内存中生成
+`LiveDatabase -> CurrentModel` SQL，并通过对应 backend lock 执行。执行后 manager 会再次 introspect，
+确认实时结构已经与模型一致。部分索引等 Toasty schema 无法表达的 backend 对象保留在数据库中，
+不会被错误归一化为普通索引。
 
 ```rust,no_run
 use toasty_mgr::migration::TcMigrationMgr;
 
 # async fn sync_schema() -> anyhow::Result<()> {
-let (generated, applied) = TcMigrationMgr::sync("auth", "schema_sync").await?;
-println!(
-    "created={}, applied={}, adopted={}",
-    generated.created, applied.applied, applied.adopted
-);
+let dry_run = TcMigrationMgr::sync("auth", true).await?;
+println!("sql={:?}", dry_run.sql);
+
+let applied = TcMigrationMgr::sync("auth", false).await?;
+println!("changed={}", applied.changed);
 
 // 按 base 优先、其余 source code 稳定排序处理全部已注册 source。
-let all = TcMigrationMgr::sync_all("schema_sync").await?;
+let all = TcMigrationMgr::sync_all(false).await?;
 println!("sources={}", all.len());
 # Ok(())
 # }
@@ -167,13 +165,14 @@ println!("rolled_back={}", report.rolled_back);
 
 关键限制：
 
-- migration SQL 的多条 statement 使用 `-- #[toasty::breakpoint]` 分隔；
+- PostgreSQL migration SQL 可直接使用普通分号分隔多条 statement，也兼容
+  `-- #[toasty::breakpoint]` 显式边界；
 - 禁止在 managed schema 中使用数据库外键、`REFERENCES` 或 cascade；
 - PostgreSQL、SQLite、Turso 的 DDL 与账本记录使用事务边界；
 - MySQL DDL 会 implicit commit，adapter 使用 database 级 `GET_LOCK` 和
   `__toasty_mgr_migration_runs`；发现异常遗留 marker 时返回 `migration_recovery_ambiguous`，不会猜测重试；
-- `sync` 面向 filesystem authoring artifact；发布二进制应注册 `MigrationArtifactInput::Embedded`，
-  并只执行 `apply`/`status`/`rollback`。
+- `sync` 是不写正式 history 的即时数据库同步能力；正式发布仍必须使用
+  `generate`、审查 artifact、`check` 和 `apply`。
 
 ## Project documentation
 

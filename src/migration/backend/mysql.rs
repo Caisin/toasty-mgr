@@ -13,7 +13,8 @@ use toasty::{
 use super::{
     AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
     LedgerMigration, MigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema,
-    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, normalize_observed,
+    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, SchemaSyncFuture,
+    normalize_observed,
 };
 use crate::migration::SchemaScope;
 
@@ -54,6 +55,15 @@ impl MigrationBackend for MySqlMigrationBackend {
                 .map(|target| (target.ty.clone(), target.storage_ty.clone()))
                 .unwrap_or(inferred))
         })
+    }
+
+    fn sync_schema<'a>(
+        &'a self,
+        source_code: &'a str,
+        sql: String,
+        db: &'a mut Db,
+    ) -> SchemaSyncFuture<'a> {
+        Box::pin(async move { sync_schema(source_code, &sql, db).await })
     }
 
     fn inspect_applied_ids<'a>(
@@ -197,6 +207,23 @@ async fn apply_migration(
     }
     .await;
     finish_lock(&migration.source_code, &lock, &mut connection, result).await
+}
+
+async fn sync_schema(source_code: &str, sql: &str, db: &mut Db) -> Result<()> {
+    let mut connection = db.connection().await?;
+    let lock = acquire_lock(source_code, &mut connection).await?;
+    let result = async {
+        ensure_no_recovery_marker(source_code, &mut connection).await?;
+        let migration = db::Migration::new_sql(sql.to_owned());
+        for statement in migration.statements() {
+            toasty::sql::statement(statement.to_owned())
+                .exec(&mut connection)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    finish_lock(source_code, &lock, &mut connection, result).await
 }
 
 async fn rollback_migration(migration: BackendMigration, db: &mut Db) -> Result<()> {
@@ -583,6 +610,7 @@ async fn inspect(request: SchemaInspectRequest<'_>) -> Result<ObservedSchema> {
                 name: index_name,
                 columns: columns.into_iter().map(|(_, name)| name).collect(),
                 unique,
+                predicate: None,
             });
     }
     for row in constraint_rows {

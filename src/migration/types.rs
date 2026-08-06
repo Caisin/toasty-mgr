@@ -92,6 +92,13 @@ pub struct MigrationApplyReport {
     pub adopted: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationSyncReport {
+    pub source: String,
+    pub changed: bool,
+    pub sql: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationRollbackSelection {
     Steps(usize),

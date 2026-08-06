@@ -140,19 +140,18 @@ async fn sqlite_sync_generates_from_live_schema_and_applies_idempotently() -> Re
         scope: SchemaScope::Managed,
     })?;
 
-    let (generated, applied) = TcMigrationMgr::sync(&source, "live_sync").await?;
-    assert!(generated.created);
-    assert_eq!(applied.applied, 1);
-    assert_eq!(applied.adopted, 0);
-    let status = TcMigrationMgr::status(&source, true).await?;
-    assert_eq!(status.applied, 1);
-    assert!(status.pending.is_empty());
-    assert!(!status.model_drift);
+    let dry_run = TcMigrationMgr::sync(&source, true).await?;
+    assert!(dry_run.changed);
+    assert!(dry_run.sql.is_some());
 
-    let (generated, applied) = TcMigrationMgr::sync(&source, "live_sync").await?;
-    assert!(!generated.created);
-    assert_eq!(applied.applied, 0);
-    assert_eq!(applied.skipped, 1);
+    let applied = TcMigrationMgr::sync(&source, false).await?;
+    assert!(applied.changed);
+    assert_eq!(applied.sql, dry_run.sql);
+    assert!(!artifact_root.exists());
+
+    let repeated = TcMigrationMgr::sync(&source, false).await?;
+    assert!(!repeated.changed);
+    assert!(repeated.sql.is_none());
 
     TcMgr::unregister(&source);
     let _ = std::fs::remove_file(database_path);

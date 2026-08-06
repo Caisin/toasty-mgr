@@ -49,6 +49,8 @@ pub struct ObservedIndex {
     pub columns: Vec<String>,
     pub unique: bool,
     pub primary_key: bool,
+    /// Backend-specific filter for a partial index; Toasty's schema cannot represent it.
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +92,7 @@ pub type AppliedIdsFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u64>>> + 
 pub type PrepareLedgerFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u64>>> + Send + 'a>>;
 pub type ApplyFuture<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
 pub type RollbackFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+pub type SchemaSyncFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerMigration {
@@ -112,6 +115,12 @@ pub trait MigrationBackend: Send + Sync + 'static {
     fn ddl_atomicity(&self) -> DdlAtomicity;
     fn inspect<'a>(&'a self, request: SchemaInspectRequest<'a>) -> InspectFuture<'a>;
     fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema>;
+    fn sync_schema<'a>(
+        &'a self,
+        source_code: &'a str,
+        sql: String,
+        db: &'a mut Db,
+    ) -> SchemaSyncFuture<'a>;
     fn inspect_applied_ids<'a>(
         &'a self,
         source_code: &'a str,
@@ -179,17 +188,38 @@ where
                 nullable: observed_column.nullable,
                 primary_key: false,
                 auto_increment: observed_column.auto_increment,
-                versionable: false,
+                versionable: target_column.is_some_and(|column| column.versionable),
             });
         }
         let mut indices = Vec::with_capacity(observed_table.indices.len());
-        for (index, observed_index) in observed_table.indices.iter().enumerate() {
+        for observed_index in observed_table
+            .indices
+            .iter()
+            .filter(|index| index.predicate.is_none())
+        {
             let target_index = target_table.and_then(|table| {
                 table
                     .indices
                     .iter()
                     .find(|candidate| index_shape_matches(table, candidate, observed_index))
             });
+            // A physical auxiliary index can use Toasty's logical primary-index name while the
+            // real PostgreSQL primary index has a backend-generated name. Once the real primary
+            // matches by shape, keeping the auxiliary index would create two normalized indices
+            // with one name and make schema sync oscillate forever.
+            if target_index.is_none()
+                && target_table.is_some_and(|table| {
+                    table.indices.iter().any(|candidate| {
+                        candidate.name == observed_index.name
+                            && observed_table
+                                .indices
+                                .iter()
+                                .any(|other| index_shape_matches(table, candidate, other))
+                    })
+                })
+            {
+                continue;
+            }
             let columns_for_index = observed_index
                 .columns
                 .iter()
@@ -226,7 +256,7 @@ where
             indices.push(Index {
                 id: IndexId {
                     table: table_id,
-                    index,
+                    index: indices.len(),
                 },
                 name: target_index
                     .map(|index| index.name.clone())
@@ -270,4 +300,121 @@ fn index_shape_matches(table: &Table, index: &Index, observed: &ObservedIndex) -
             .iter()
             .zip(&observed.columns)
             .all(|(column, name)| table.column(column.column).name == *name)
+}
+
+#[cfg(test)]
+mod tests {
+    use toasty::{schema::db, stmt};
+
+    use super::{ObservedColumn, ObservedIndex, ObservedSchema, ObservedTable, normalize_observed};
+
+    #[test]
+    fn partial_indices_stay_in_fingerprint_but_not_in_toasty_schema() {
+        let observed = ObservedSchema {
+            namespace: "public".to_owned(),
+            tables: vec![ObservedTable {
+                name: "demo".to_owned(),
+                comment: None,
+                columns: vec![ObservedColumn {
+                    name: "id".to_owned(),
+                    data_type: "bigint".to_owned(),
+                    native_type: "bigint".to_owned(),
+                    nullable: false,
+                    auto_increment: true,
+                    default: None,
+                    ordinal: 1,
+                    comment: None,
+                }],
+                indices: vec![
+                    ObservedIndex {
+                        name: "demo_pkey".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        unique: true,
+                        primary_key: true,
+                        predicate: None,
+                    },
+                    ObservedIndex {
+                        name: "demo_id_present".to_owned(),
+                        columns: vec!["id".to_owned()],
+                        unique: true,
+                        primary_key: false,
+                        predicate: Some("id > 0".to_owned()),
+                    },
+                ],
+            }],
+            diagnostics: Vec::new(),
+        };
+        let fingerprint = observed.fingerprint();
+        let normalized = normalize_observed(&observed, &db::Schema::default(), |_, _| {
+            Ok((stmt::Type::I64, db::Type::Integer(8)))
+        })
+        .unwrap();
+
+        assert_eq!(normalized.tables[0].indices.len(), 1);
+        assert!(normalized.tables[0].indices[0].primary_key);
+        assert!(fingerprint.contains("fnv1a64:"));
+    }
+
+    #[test]
+    fn physical_primary_index_wins_over_shadowing_auxiliary_index() {
+        let target_observed = schema_with_indices(vec![ObservedIndex {
+            name: "logical_demo_pkey".to_owned(),
+            columns: vec!["id".to_owned()],
+            unique: true,
+            primary_key: true,
+            predicate: None,
+        }]);
+        let target = normalize_i64(&target_observed, &db::Schema::default());
+        let live = schema_with_indices(vec![
+            ObservedIndex {
+                name: "demo_pkey".to_owned(),
+                columns: vec!["id".to_owned()],
+                unique: true,
+                primary_key: true,
+                predicate: None,
+            },
+            ObservedIndex {
+                name: "logical_demo_pkey".to_owned(),
+                columns: vec!["id".to_owned()],
+                unique: true,
+                primary_key: false,
+                predicate: None,
+            },
+        ]);
+
+        let normalized = normalize_i64(&live, &target);
+
+        assert_eq!(normalized.tables[0].indices.len(), 1);
+        assert_eq!(normalized.tables[0].indices[0].name, "logical_demo_pkey");
+        assert!(normalized.tables[0].indices[0].primary_key);
+    }
+
+    fn schema_with_indices(indices: Vec<ObservedIndex>) -> ObservedSchema {
+        ObservedSchema {
+            namespace: "public".to_owned(),
+            tables: vec![ObservedTable {
+                name: "demo".to_owned(),
+                comment: None,
+                columns: vec![ObservedColumn {
+                    name: "id".to_owned(),
+                    data_type: "bigint".to_owned(),
+                    native_type: "bigint".to_owned(),
+                    nullable: false,
+                    auto_increment: true,
+                    default: None,
+                    ordinal: 1,
+                    comment: None,
+                }],
+                indices,
+            }],
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn normalize_i64(observed: &ObservedSchema, target: &db::Schema) -> db::Schema {
+        normalize_observed(observed, target, |_, _| {
+            Ok((stmt::Type::I64, db::Type::Integer(8)))
+        })
+        .unwrap()
+    }
 }

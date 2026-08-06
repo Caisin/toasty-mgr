@@ -19,8 +19,8 @@ use super::{
     MigrationArtifactInput, MigrationArtifactSet, MigrationBackend, MigrationCheckReport,
     MigrationGenerateOutcome, MigrationGenerateRequest, MigrationRollbackReport,
     MigrationRollbackSelection, MigrationSourceConfig, MigrationSourcesConfig,
-    MigrationStatusReport, MySqlMigrationBackend, PostgreSqlMigrationBackend, SchemaInspectRequest,
-    SchemaOrigin, SqliteMigrationBackend, TursoMigrationBackend,
+    MigrationStatusReport, MigrationSyncReport, MySqlMigrationBackend, PostgreSqlMigrationBackend,
+    SchemaInspectRequest, SchemaOrigin, SchemaScope, SqliteMigrationBackend, TursoMigrationBackend,
     artifact::{inspect_state, load_snapshot},
 };
 
@@ -66,11 +66,6 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 
 /// Process-wide migration manager for explicitly registered sources.
 pub struct TcMigrationMgr;
-
-struct GeneratedMigration {
-    outcome: MigrationGenerateOutcome,
-    adopt_baseline: bool,
-}
 
 impl TcMigrationMgr {
     pub fn register_model_sources(config: MigrationSourcesConfig) -> Result<Vec<String>> {
@@ -147,44 +142,54 @@ impl TcMigrationMgr {
         Ok(outcomes)
     }
 
-    pub async fn sync(
-        source: &str,
-        name: &str,
-    ) -> Result<(MigrationGenerateOutcome, MigrationApplyReport)> {
-        let state = Self::artifact_state(source)?;
-        let applied = if state == ArtifactState::Ready {
-            Self::apply(source, MigrationApplyMode::Execute).await?
-        } else {
-            MigrationApplyReport::default()
+    pub async fn sync(source: &str, dry_run: bool) -> Result<MigrationSyncReport> {
+        let config = source_config(source)?;
+        let mut db = TcMgr::get(&config.code).await?;
+        let backend = backend_for(&config, &db)?;
+        let observed = inspect_normalized_schema(&config, &mut db, backend.as_ref()).await?;
+        let current = db.schema().db.clone();
+        let Some(generated) = toasty::migration::generate(
+            db.driver(),
+            &observed,
+            &current,
+            &diff::RenameHints::new(),
+        ) else {
+            return Ok(MigrationSyncReport {
+                source: config.code,
+                changed: false,
+                sql: None,
+            });
         };
-        let generated = Self::generate_internal(MigrationGenerateRequest {
-            source: source.to_owned(),
-            name: name.to_owned(),
-            origin: SchemaOrigin::LiveDatabase,
-            ..MigrationGenerateRequest::default()
-        })
-        .await?;
-        if state == ArtifactState::Ready && !generated.outcome.created {
-            return Ok((generated.outcome, applied));
+        let db::Migration::Sql(sql) = generated.migration;
+        validate_sql(&sql)?;
+        if !dry_run {
+            backend
+                .sync_schema(&config.code, sql.clone(), &mut db)
+                .await?;
+            let synchronized =
+                inspect_normalized_schema(&config, &mut db, backend.as_ref()).await?;
+            if toasty::migration::generate(
+                db.driver(),
+                &current,
+                &synchronized,
+                &diff::RenameHints::new(),
+            )
+            .is_some()
+            {
+                bail!("migration_sync_incomplete: {}", config.code);
+            }
         }
-        let mode = if generated.adopt_baseline {
-            MigrationApplyMode::AdoptBaseline
-        } else {
-            MigrationApplyMode::Execute
-        };
-        let mut final_apply = Self::apply(source, mode).await?;
-        final_apply.applied += applied.applied;
-        final_apply.adopted += applied.adopted;
-        Ok((generated.outcome, final_apply))
+        Ok(MigrationSyncReport {
+            source: config.code,
+            changed: true,
+            sql: Some(sql),
+        })
     }
 
-    pub async fn sync_all(
-        name: impl Into<String>,
-    ) -> Result<Vec<(MigrationGenerateOutcome, MigrationApplyReport)>> {
-        let name = name.into();
+    pub async fn sync_all(dry_run: bool) -> Result<Vec<MigrationSyncReport>> {
         let mut outcomes = Vec::with_capacity(Self::source_codes().len());
         for source in Self::source_codes() {
-            outcomes.push(Self::sync(&source, &name).await?);
+            outcomes.push(Self::sync(&source, dry_run).await?);
         }
         Ok(outcomes)
     }
@@ -220,10 +225,12 @@ impl TcMigrationMgr {
     }
 
     pub async fn generate(request: MigrationGenerateRequest) -> Result<MigrationGenerateOutcome> {
-        Ok(Self::generate_internal(request).await?.outcome)
+        Self::generate_internal(request).await
     }
 
-    async fn generate_internal(request: MigrationGenerateRequest) -> Result<GeneratedMigration> {
+    async fn generate_internal(
+        request: MigrationGenerateRequest,
+    ) -> Result<MigrationGenerateOutcome> {
         let config = source_config(&request.source)?;
         let state = inspect_state(&config.artifact_root);
         if matches!(state, ArtifactState::Partial | ArtifactState::Invalid) {
@@ -268,9 +275,11 @@ impl TcMigrationMgr {
                         db: &mut db,
                     })
                     .await?;
-                let observed_schema = backend.normalize(&observed, &current_schema)?;
+                let mut observed_schema = backend.normalize(&observed, &current_schema)?;
                 if state == ArtifactState::Ready {
                     let latest = latest_schema(&history, &snapshots_dir)?;
+                    observed_schema =
+                        project_managed_indices(observed_schema, &latest, &config.scope);
                     if let Some(drift) = toasty::migration::generate(
                         db.driver(),
                         &latest,
@@ -316,30 +325,24 @@ impl TcMigrationMgr {
             toasty::migration::generate(db.driver(), &previous_schema, &current_schema, &hints)
         else {
             if let Some((id, migration_path, rollback_path, snapshot_path)) = baseline_written {
-                return Ok(GeneratedMigration {
-                    outcome: MigrationGenerateOutcome {
-                        source: config.code,
-                        created: true,
-                        id: Some(id),
-                        migration_path: Some(migration_path),
-                        rollback_path: Some(rollback_path),
-                        snapshot_path: Some(snapshot_path),
-                        artifact_state: ArtifactState::Ready,
-                    },
-                    adopt_baseline: true,
+                return Ok(MigrationGenerateOutcome {
+                    source: config.code,
+                    created: true,
+                    id: Some(id),
+                    migration_path: Some(migration_path),
+                    rollback_path: Some(rollback_path),
+                    snapshot_path: Some(snapshot_path),
+                    artifact_state: ArtifactState::Ready,
                 });
             }
-            return Ok(GeneratedMigration {
-                outcome: MigrationGenerateOutcome {
-                    source: config.code,
-                    created: false,
-                    id: None,
-                    migration_path: None,
-                    rollback_path: None,
-                    snapshot_path: None,
-                    artifact_state: state,
-                },
-                adopt_baseline: false,
+            return Ok(MigrationGenerateOutcome {
+                source: config.code,
+                created: false,
+                id: None,
+                migration_path: None,
+                rollback_path: None,
+                snapshot_path: None,
+                artifact_state: state,
             });
         };
         let rollback = toasty::migration::generate(
@@ -351,17 +354,14 @@ impl TcMigrationMgr {
         .context("model schema produced no rollback migration")?;
         let (id, migration_path, rollback_path, snapshot_path) =
             write_generated(&config, &mut history, &request.name, generated, rollback)?;
-        Ok(GeneratedMigration {
-            outcome: MigrationGenerateOutcome {
-                source: config.code,
-                created: true,
-                id: Some(id),
-                migration_path: Some(migration_path),
-                rollback_path: Some(rollback_path),
-                snapshot_path: Some(snapshot_path),
-                artifact_state: ArtifactState::Ready,
-            },
-            adopt_baseline: baseline_written.is_some(),
+        Ok(MigrationGenerateOutcome {
+            source: config.code,
+            created: true,
+            id: Some(id),
+            migration_path: Some(migration_path),
+            rollback_path: Some(rollback_path),
+            snapshot_path: Some(snapshot_path),
+            artifact_state: ArtifactState::Ready,
         })
     }
 
@@ -699,6 +699,61 @@ fn backend_for(config: &MigrationSourceConfig, db: &Db) -> Result<Arc<dyn Migrat
         .get(&id)
         .cloned()
         .with_context(|| format!("migration_backend_not_registered: {id}"))
+}
+
+async fn inspect_normalized_schema(
+    config: &MigrationSourceConfig,
+    db: &mut Db,
+    backend: &dyn MigrationBackend,
+) -> Result<db::Schema> {
+    let managed_tables = managed_table_names(&db.schema().db);
+    let observed = backend
+        .inspect(SchemaInspectRequest {
+            source_code: &config.code,
+            namespace: config.namespace.as_deref(),
+            scope: &config.scope,
+            managed_tables: &managed_tables,
+            db: &mut *db,
+        })
+        .await?;
+    backend.normalize(&observed, &db.schema().db)
+}
+
+fn project_managed_indices(
+    mut observed: db::Schema,
+    target: &db::Schema,
+    scope: &SchemaScope,
+) -> db::Schema {
+    if matches!(scope, SchemaScope::NamespaceExclusive) {
+        return observed;
+    }
+    for observed_table in &mut observed.tables {
+        let Some(target_table) = target
+            .tables
+            .iter()
+            .find(|table| table.name == observed_table.name)
+        else {
+            continue;
+        };
+        let observed_columns = &observed_table.columns;
+        observed_table.indices.retain(|observed_index| {
+            observed_index.unique
+                || target_table.indices.iter().any(|target_index| {
+                    observed_index.unique == target_index.unique
+                        && observed_index.primary_key == target_index.primary_key
+                        && observed_index.columns.len() == target_index.columns.len()
+                        && observed_index
+                            .columns
+                            .iter()
+                            .zip(&target_index.columns)
+                            .all(|(observed_column, target_column)| {
+                                observed_columns[observed_column.column.index].name
+                                    == target_table.columns[target_column.column.index].name
+                            })
+                })
+        });
+    }
+    observed
 }
 
 fn resolve_artifacts(

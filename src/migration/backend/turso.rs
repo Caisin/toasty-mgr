@@ -4,7 +4,7 @@ use toasty::{Db, schema::db};
 use super::{
     AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
     LedgerMigration, MigrationBackend, ObservedSchema, PrepareLedgerFuture, RollbackFuture,
-    SchemaInspectRequest, sqlite,
+    SchemaInspectRequest, SchemaSyncFuture, sqlite,
 };
 
 /// Turso uses SQLite catalog and DDL semantics, but remains a separately registered backend so
@@ -40,6 +40,15 @@ impl MigrationBackend for TursoMigrationBackend {
 
     fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema> {
         sqlite::normalize(observed, target)
+    }
+
+    fn sync_schema<'a>(
+        &'a self,
+        _source_code: &'a str,
+        sql: String,
+        db: &'a mut Db,
+    ) -> SchemaSyncFuture<'a> {
+        Box::pin(async move { sqlite::sync_schema(&sql, db).await })
     }
 
     fn inspect_applied_ids<'a>(

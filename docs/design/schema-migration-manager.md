@@ -115,10 +115,8 @@ impl TcMigrationMgr {
 
     pub async fn generate(request: MigrationGenerateRequest) -> Result<MigrationGenerateOutcome>;
     pub async fn generate_all(name: impl Into<String>) -> Result<Vec<MigrationGenerateOutcome>>;
-    pub async fn sync(source: &str, name: &str)
-        -> Result<(MigrationGenerateOutcome, MigrationApplyReport)>;
-    pub async fn sync_all(name: impl Into<String>)
-        -> Result<Vec<(MigrationGenerateOutcome, MigrationApplyReport)>>;
+    pub async fn sync(source: &str, dry_run: bool) -> Result<MigrationSyncReport>;
+    pub async fn sync_all(dry_run: bool) -> Result<Vec<MigrationSyncReport>>;
     pub async fn baseline(source: &str, name: &str) -> Result<MigrationGenerateOutcome>;
     pub async fn apply(source: &str, mode: MigrationApplyMode) -> Result<MigrationApplyReport>;
     pub async fn apply_all() -> Result<MigrationApplyReport>;
@@ -136,9 +134,9 @@ impl TcMigrationMgr {
 `register_source()` 只保留给需要覆盖 namespace/scope/backend 的特殊 source。应用直接复用本模块
 的 outcome/report，不再声明一组镜像 DTO，也不增加只调用 manager 一次的 facade。
 `apply_all()`、`status_all()`、`generate_all()` 与 `sync_all()` 负责真正包含循环、预检和汇总的多
-source 编排。`sync` 固定使用 `SchemaOrigin::LiveDatabase`，先写 tracked artifact，再通过同一个
-apply engine 执行；空谱系观察到既存表时自动选择经 live schema 校验的 `AdoptBaseline`。
-single-database 配置仍逐 logical source 执行，依靠 `SchemaScope` 和复合账本隔离。
+source 编排。`sync` 独立执行 `LiveDatabase -> CurrentModel` 内存迁移，不读取 snapshot，不写
+artifact/history/账本；`dry_run=true` 只返回 SQL。实际执行后必须重新 introspect 并验证收敛。
+single-database 配置仍逐 logical source 执行，依靠 `SchemaScope` 隔离观察范围。
 
 artifact 来源在 source 注册阶段显式绑定：
 

@@ -10,7 +10,8 @@ use toasty::{
 use super::{
     AppliedIdsFuture, ApplyFuture, BackendId, BackendMigration, DdlAtomicity, InspectFuture,
     LedgerMigration, MigrationBackend, ObservedColumn, ObservedIndex, ObservedSchema,
-    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, normalize_observed,
+    ObservedTable, PrepareLedgerFuture, RollbackFuture, SchemaInspectRequest, SchemaSyncFuture,
+    normalize_observed,
 };
 use crate::migration::SchemaScope;
 
@@ -45,6 +46,15 @@ impl MigrationBackend for SqliteMigrationBackend {
 
     fn normalize(&self, observed: &ObservedSchema, target: &db::Schema) -> Result<db::Schema> {
         normalize(observed, target)
+    }
+
+    fn sync_schema<'a>(
+        &'a self,
+        _source_code: &'a str,
+        sql: String,
+        db: &'a mut Db,
+    ) -> SchemaSyncFuture<'a> {
+        Box::pin(async move { sync_schema(&sql, db).await })
     }
 
     fn inspect_applied_ids<'a>(
@@ -176,6 +186,13 @@ pub(super) async fn apply_migration(
         Ok(true)
     }
     .await;
+    finish_transaction(&mut connection, result).await
+}
+
+pub(super) async fn sync_schema(sql: &str, db: &mut Db) -> Result<()> {
+    let mut connection = db.connection().await?;
+    begin_immediate(&mut connection).await?;
+    let result = execute_sql_statements(sql, &mut connection).await;
     finish_transaction(&mut connection, result).await
 }
 
@@ -390,6 +407,7 @@ pub(super) async fn inspect(request: SchemaInspectRequest<'_>) -> Result<Observe
                 columns: primary_columns.into_iter().map(|(_, name)| name).collect(),
                 unique: true,
                 primary_key: true,
+                predicate: None,
             });
         }
         let index_rows =
@@ -404,9 +422,6 @@ pub(super) async fn inspect(request: SchemaInspectRequest<'_>) -> Result<Observe
             let partial = value_i64(&values[4])? != 0;
             if origin == "pk" {
                 continue;
-            }
-            if partial {
-                diagnostics.push(format!("sqlite_partial_index:{table_name}.{index_name}"));
             }
             let index_ident = quote_identifier(&index_name);
             let part_rows =
@@ -436,6 +451,7 @@ pub(super) async fn inspect(request: SchemaInspectRequest<'_>) -> Result<Observe
                 columns: parts.into_iter().map(|(_, name)| name).collect(),
                 unique,
                 primary_key: false,
+                predicate: partial.then(|| "partial".to_owned()),
             });
         }
         let foreign_keys = toasty::sql::query(format!(
